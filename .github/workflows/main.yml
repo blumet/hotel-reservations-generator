@@ -3,7 +3,7 @@ name: Daily Reservations Generator
 on:
   schedule:
     - cron: '0 1 * * *'  # runs every day at 1:00 AM UTC
-  workflow_dispatch:      # lets you run it manually too
+  workflow_dispatch:      # allows manual runs
   push:
     paths-ignore:
       - '.github/workflows/**'
@@ -16,8 +16,7 @@ jobs:
       - name: Get your code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0              # full history for rebase
-          persist-credentials: true   # keeps the GitHub token for pushing
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,16 +28,12 @@ jobs:
           mkdir -p output state
           python generate_daily_reservations.py
 
-      - name: Save new file
-        run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git fetch origin main
-          git checkout main
-          git pull --rebase origin main || true
-          git add output/ state/
-          git commit -m "Daily reservations CSV for $(date +'%Y-%m-%d')" || echo "No changes to commit"
-          git push origin HEAD:main --force-with-lease
+      - name: Upload daily CSV as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Daily-Reservations-CSV
+          path: output/*.csv
+          retention-days: 7   # keep artifact for 7 days
 
       - name: Email daily CSV
         uses: dawidd6/action-send-mail@v3
@@ -52,7 +47,9 @@ jobs:
             Hello 👋  
 
             Here is your automatically generated Reservations CSV for today.  
-            The file includes 100 reservations, generated based on your business rules.  
+            The file includes 100 reservations generated from your business rules.  
+
+            You can also download it directly from the workflow run page under “Artifacts.”
 
             Have a great day!  
             — Your Automated Booking Engine 🤖
