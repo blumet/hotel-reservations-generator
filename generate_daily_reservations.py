@@ -4,7 +4,7 @@ Generate a daily reservations CSV (100 rows) following business rules.
 """
 
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import random
 import json
 import csv
@@ -72,6 +72,17 @@ def next_profile_id(state):
     return pid
 
 # ------------------------------------------------------------
+# Helper: random time in ISO format for ETA/ETD
+# ------------------------------------------------------------
+
+def random_time_iso(date_obj):
+    """Return ISO 8601 timestamp with random time between 05:00 and 23:45."""
+    hour = random.randint(5, 23)
+    minute = random.choice([0, 15, 30, 45])  # quarter-hour increments
+    dt = datetime.combine(date_obj, time(hour, minute))
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+# ------------------------------------------------------------
 # Business logic for rates, companies, and record generation
 # ------------------------------------------------------------
 
@@ -105,6 +116,10 @@ def generate_row(state, today=None):
         no_of_children = ""
         child_age_bucket = "C1"  # still included, just empty count
 
+    # ⏰ Random ETA and ETD (ISO timestamps)
+    eta = random_time_iso(arrival)
+    etd = random_time_iso(departure)
+
     return {
         "profileId": next_profile_id(state),
         "arrivaldate": arrival.strftime("%Y-%m-%d"),
@@ -128,8 +143,8 @@ def generate_row(state, today=None):
         "Preferences": "",
         "AccompanyingGuestProfiles": "",
         "Membership": "",
-        "ETA": "",
-        "ETD": "",
+        "ETA": eta,
+        "ETD": etd,
         "TotalAmount": "",
         "BreakdownAmount": "",
         "Purpose": "",
@@ -191,4 +206,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
