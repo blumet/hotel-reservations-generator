@@ -17,7 +17,13 @@ CONFIG = {
     "external_id_start": 5006091,  # last known ExternalID
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
-    "allow_COR25": False
+    "allow_COR25": False,
+    "date_distribution": {  # 🔧 You can adjust these percentages anytime
+        "next_30_days": 0.5,   # 50%
+        "next_60_days": 0.2,   # 20%
+        "next_90_days": 0.2,   # 20%
+        "next_120_days": 0.1   # 10%
+    }
 }
 
 ROOM_TYPES = ["KGDX", "TWDX", "KGSP", "TWSP", "A1KB", "KGST", "KCDX", "TCDX", "KINGR", "KCST"]
@@ -26,7 +32,6 @@ GUARANTEE_TYPES = ["PRE", "HOLD", "OFF"]
 CHANNELS = ["CRS", "GDS", "HOT", "IBE", "OTH", "SIT", "SYN", "CRO"]
 SOURCES = ["COR", "IBE", "PMS", "SAL", "TVL"]
 
-# ✅ Cleaned-up company names
 COMPANIES = [
     "Accenture", "Telefonica", "BerkshireHathaway", "GrupoACS", "Rolex AG", "Exxon", "Volkswagen",
     "Tesla", "Saudi Aramco", "Bilbao", "MercedesB", "GrupoCatalana", "Siemens", "Amazon Switzerland",
@@ -92,6 +97,27 @@ def random_time_iso(date_obj):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 # ------------------------------------------------------------
+# Helper: weighted arrival date based on CONFIG
+# ------------------------------------------------------------
+
+def pick_arrival_date(today):
+    """Select a random arrival date based on weighted probabilities."""
+    dist = CONFIG["date_distribution"]
+    roll = random.random()
+    cumulative = 0
+
+    if roll < (cumulative := cumulative + dist["next_30_days"]):
+        start, end = 1, 30
+    elif roll < (cumulative := cumulative + dist["next_60_days"]):
+        start, end = 31, 60
+    elif roll < (cumulative := cumulative + dist["next_90_days"]):
+        start, end = 61, 90
+    else:
+        start, end = 91, 120
+
+    return today + timedelta(days=random.randint(start, end))
+
+# ------------------------------------------------------------
 # Business logic for rates, companies, preferences, and record generation
 # ------------------------------------------------------------
 
@@ -101,7 +127,6 @@ def pick_rate_and_company(room_type):
         return "BAREX", ""
     rate = random.choice(RATE_CODES_POOL)
     if rate == "COR25":
-        # ✅ Updated company names for COR25 rule
         company = random.choice(["Deloitte", "Saudi Aramco", "GrupoACS", "Volkswagen"])
     else:
         company = random.choice(COMPANIES) if random.random() < 0.7 else ""
@@ -117,9 +142,7 @@ def generate_row(state, today=None):
     if today is None:
         today = datetime.today().date()
 
-    arrival_lower = today + timedelta(days=1)
-    arrival_upper = today + timedelta(days=45)
-    arrival = arrival_lower + timedelta(days=random.randint(0, (arrival_upper - arrival_lower).days))
+    arrival = pick_arrival_date(today)
     stay_len = random.randint(1, 10)
     departure = arrival + timedelta(days=stay_len)
     room_type = random.choice(ROOM_TYPES)
@@ -131,7 +154,7 @@ def generate_row(state, today=None):
         child_age_bucket = "C1"
     else:
         no_of_children = ""
-        child_age_bucket = "C1"  # still included, just empty count
+        child_age_bucket = "C1"
 
     # ⏰ Random ETA and ETD (ISO timestamps)
     eta = random_time_iso(arrival)
