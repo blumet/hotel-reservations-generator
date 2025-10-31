@@ -25,17 +25,19 @@ MARKET_SEGMENTS = ["FIT1", "PRMF", "CORG", "CORN", "CORL"]
 GUARANTEE_TYPES = ["PRE", "HOLD", "OFF"]
 CHANNELS = ["CRS", "GDS", "HOT", "IBE", "OTH", "SIT", "SYN", "CRO"]
 SOURCES = ["COR", "IBE", "PMS", "SAL", "TVL"]
+
+# ✅ Cleaned-up company names
 COMPANIES = [
     "Accenture", "Telefonica", "BerkshireHathaway", "GrupoACS", "Rolex AG", "Exxon", "Volkswagen",
     "Tesla", "Saudi Aramco", "Bilbao", "MercedesB", "GrupoCatalana", "Siemens", "Amazon Switzerland",
     "Adidas GmbH", "Amazon Austria", "Amazon Germany", "Apple Incorporated Spain", "Austrian Airlines",
-    "ABN Amro", "CNN News Group", "BMW", "Deloitte", "Volkswagen AG", "Grupo ACS"
+    "ABN Amro", "CNN News Group", "BMW", "Deloitte"
 ]
+
 RATE_CODES_POOL = ["BAR00", "BAR10", "OTA1", "CORL25", "OPQ", "DAY", "BARAD", "RACK"]
 if CONFIG["allow_COR25"]:
     RATE_CODES_POOL.append("COR25")
 
-# Preference codes
 PREFERENCE_CODES = [
     "ACCESS", "BAL", "BAL2", "DBL2", "FPLACE", "KING", "PVIEW", "GVIEW", "SOFB", "SOFL",
     "2BTH", "CON", "DIN", "EXT", "HF", "HTCN", "KITC", "LF", "LUG", "MIN", "PLA",
@@ -94,11 +96,13 @@ def random_time_iso(date_obj):
 # ------------------------------------------------------------
 
 def pick_rate_and_company(room_type):
+    """Assign rate plan and company based on room type and business rules."""
     if room_type in {"KCDX", "TCDX", "KCST"}:
         return "BAREX", ""
     rate = random.choice(RATE_CODES_POOL)
     if rate == "COR25":
-        company = random.choice(["Deloitte", "Saudi Aramco", "Grupo ACS", "Volkswagen AG"])
+        # ✅ Updated company names for COR25 rule
+        company = random.choice(["Deloitte", "Saudi Aramco", "GrupoACS", "Volkswagen"])
     else:
         company = random.choice(COMPANIES) if random.random() < 0.7 else ""
     return rate, company
@@ -222,6 +226,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
