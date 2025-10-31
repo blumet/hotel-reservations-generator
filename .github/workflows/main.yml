@@ -30,3 +30,23 @@ jobs:
           git add output/ state/
           git commit -m "Daily reservations CSV for $(date +'%Y-%m-%d')" || echo "No changes"
           git push
+
+      - name: Email daily CSV
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          username: ${{ secrets.MAIL_USERNAME }}
+          password: ${{ secrets.MAIL_PASSWORD }}
+          subject: "Your Daily Reservations CSV"
+          body: |
+            Hello 👋  
+            
+            Here is your automatically generated Reservations CSV for today.  
+            The file includes 100 reservations, generated based on your business rules.  
+
+            Have a great day!  
+            — Your Automated Booking Engine 🤖
+          to: yourname@gmail.com
+          from: ${{ secrets.MAIL_USERNAME }}
+          attachments: output/Reservations_*.csv
