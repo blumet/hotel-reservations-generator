@@ -35,6 +35,13 @@ RATE_CODES_POOL = ["BAR00", "BAR10", "OTA1", "CORL25", "OPQ", "DAY", "BARAD", "R
 if CONFIG["allow_COR25"]:
     RATE_CODES_POOL.append("COR25")
 
+# Preference codes
+PREFERENCE_CODES = [
+    "ACCESS", "BAL", "BAL2", "DBL2", "FPLACE", "KING", "PVIEW", "GVIEW", "SOFB", "SOFL",
+    "2BTH", "CON", "DIN", "EXT", "HF", "HTCN", "KITC", "LF", "LUG", "MIN", "PLA",
+    "POW", "QUI", "SAF", "SEA", "SM", "SPAB", "TWIN"
+]
+
 # ------------------------------------------------------------
 # State handling (persistent tracking for ExternalID and ProfileID)
 # ------------------------------------------------------------
@@ -83,7 +90,7 @@ def random_time_iso(date_obj):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 # ------------------------------------------------------------
-# Business logic for rates, companies, and record generation
+# Business logic for rates, companies, preferences, and record generation
 # ------------------------------------------------------------
 
 def pick_rate_and_company(room_type):
@@ -95,6 +102,12 @@ def pick_rate_and_company(room_type):
     else:
         company = random.choice(COMPANIES) if random.random() < 0.7 else ""
     return rate, company
+
+def pick_preference():
+    """Randomly choose one preference code or leave blank."""
+    if random.random() < 0.4:  # 40% chance to assign one
+        return random.choice(PREFERENCE_CODES)
+    return ""
 
 def generate_row(state, today=None):
     if today is None:
@@ -120,6 +133,9 @@ def generate_row(state, today=None):
     eta = random_time_iso(arrival)
     etd = random_time_iso(departure)
 
+    # 🎯 Random Preferences
+    preference = pick_preference()
+
     return {
         "profileId": next_profile_id(state),
         "arrivaldate": arrival.strftime("%Y-%m-%d"),
@@ -140,7 +156,7 @@ def generate_row(state, today=None):
         "Source": random.choice(SOURCES),
         "companyProfile": company,
         "TravelAgentProfile": "",
-        "Preferences": "",
+        "Preferences": preference,
         "AccompanyingGuestProfiles": "",
         "Membership": "",
         "ETA": eta,
@@ -206,5 +222,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
