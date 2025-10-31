@@ -32,7 +32,8 @@ jobs:
           git pull --rebase origin main || true
           git add output/ state/
           git commit -m "Daily reservations CSV for $(date +'%Y-%m-%d')" || echo "No changes to commit"
-          git push origin main --force
+          git push origin HEAD:main --force-with-lease
+
 
       - name: Email daily CSV
         uses: dawidd6/action-send-mail@v3
