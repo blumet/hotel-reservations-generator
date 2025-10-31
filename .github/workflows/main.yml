@@ -23,13 +23,15 @@ jobs:
           mkdir -p output state
           python generate_daily_reservations.py
 
-      - name: Save new file
+            - name: Save new file
         run: |
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
+          git pull --rebase origin main
           git add output/ state/
           git commit -m "Daily reservations CSV for $(date +'%Y-%m-%d')" || echo "No changes"
           git push
+
 
       - name: Email daily CSV
         uses: dawidd6/action-send-mail@v3
