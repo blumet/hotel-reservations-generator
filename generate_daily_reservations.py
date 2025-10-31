@@ -97,6 +97,14 @@ def generate_row(state, today=None):
     room_type = random.choice(ROOM_TYPES)
     rate, company = pick_rate_and_company(room_type)
 
+    # 👶 Add one child automatically if room type is A1KB
+    if room_type == "A1KB":
+        no_of_children = 1
+        child_age_bucket = "C1"
+    else:
+        no_of_children = ""
+        child_age_bucket = "C1"  # still included, just empty count
+
     return {
         "profileId": next_profile_id(state),
         "arrivaldate": arrival.strftime("%Y-%m-%d"),
@@ -106,8 +114,8 @@ def generate_row(state, today=None):
         "DoNotMove": "",
         "AdultAgeBucket": "A1",
         "NoOfAdults": random.choice([1, 2]),
-        "ChildAgeBucket": "C1",
-        "NoOfChildren": "",
+        "ChildAgeBucket": child_age_bucket,
+        "NoOfChildren": no_of_children,
         "RoomTypeToCharge": room_type,
         "RatePlan": rate,
         "CurrencyCode": "EUR",
@@ -183,3 +191,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
