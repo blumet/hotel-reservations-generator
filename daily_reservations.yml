@@ -18,10 +18,24 @@ jobs:
         with:
           python-version: '3.11'
 
+      # 🧠 Restore cached state so ExternalID continues correctly
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: reservation-state
+
       - name: Run your script
         run: |
           mkdir -p output state
           python generate_daily_reservations.py
+
+      # 💾 Save updated state so it persists between runs
+      - name: Save state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: reservation-state
 
       - name: Upload CSV as artifact
         uses: actions/upload-artifact@v4
