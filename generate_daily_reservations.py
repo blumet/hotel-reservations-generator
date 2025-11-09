@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Generate a daily reservations CSV (100 rows) following business rules.
+Generate a daily reservations CSV (100 rows) following business rules,
+using weighted room type distribution and persistent ExternalIDs.
 """
 
 from pathlib import Path
@@ -14,7 +15,7 @@ STATE_DIR = Path("./state")
 STATE_FILE = STATE_DIR / "state.json"
 
 CONFIG = {
-    "external_id_start": 5006292,  # ✅ Updated starting ExternalID
+    "external_id_start": 5006292,  # ✅ New starting ExternalID
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
@@ -23,10 +24,21 @@ CONFIG = {
         "next_60_days": 0.2,   # 20%
         "next_90_days": 0.2,   # 20%
         "next_120_days": 0.1   # 10%
+    },
+    "room_distribution": {  # 🎯 Weighted room type probabilities
+        "KGDX": 0.30,
+        "TWDX": 0.20,
+        "KGSP": 0.10,
+        "TWSP": 0.05,
+        "A1KB": 0.02,
+        "KGST": 0.083,
+        "KCDX": 0.083,
+        "TCDX": 0.083,
+        "KINGR": 0.083,
+        "KCST": 0.083,
     }
 }
 
-ROOM_TYPES = ["KGDX", "TWDX", "KGSP", "TWSP", "A1KB", "KGST", "KCDX", "TCDX", "KINGR", "KCST"]
 MARKET_SEGMENTS = ["FIT1", "PRMF", "CORG", "CORN", "CORL"]
 GUARANTEE_TYPES = ["PRE", "HOLD", "OFF"]
 CHANNELS = ["CRS", "GDS", "HOT", "IBE", "OTH", "SIT", "SYN", "CRO"]
@@ -92,7 +104,7 @@ def next_profile_id(state):
 def random_time_iso(date_obj):
     """Return ISO 8601 timestamp with random time between 05:00 and 23:45."""
     hour = random.randint(5, 23)
-    minute = random.choice([0, 15, 30, 45])  # quarter-hour increments
+    minute = random.choice([0, 15, 30, 45])
     dt = datetime.combine(date_obj, time(hour, minute))
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -118,7 +130,17 @@ def pick_arrival_date(today):
     return today + timedelta(days=random.randint(start, end))
 
 # ------------------------------------------------------------
-# Business logic for rates, companies, preferences, and record generation
+# Room type picker (weighted)
+# ------------------------------------------------------------
+
+def pick_room_type():
+    """Randomly select a room type using weighted probabilities."""
+    room_types = list(CONFIG["room_distribution"].keys())
+    weights = list(CONFIG["room_distribution"].values())
+    return random.choices(room_types, weights=weights, k=1)[0]
+
+# ------------------------------------------------------------
+# Business logic for rates, companies, preferences
 # ------------------------------------------------------------
 
 def pick_rate_and_company(room_type):
@@ -134,9 +156,13 @@ def pick_rate_and_company(room_type):
 
 def pick_preference():
     """Randomly choose one preference code or leave blank."""
-    if random.random() < 0.4:  # 40% chance to assign one
+    if random.random() < 0.4:
         return random.choice(PREFERENCE_CODES)
     return ""
+
+# ------------------------------------------------------------
+# Row generator
+# ------------------------------------------------------------
 
 def generate_row(state, today=None):
     if today is None:
@@ -145,10 +171,9 @@ def generate_row(state, today=None):
     arrival = pick_arrival_date(today)
     stay_len = random.randint(1, 10)
     departure = arrival + timedelta(days=stay_len)
-    room_type = random.choice(ROOM_TYPES)
+    room_type = pick_room_type()
     rate, company = pick_rate_and_company(room_type)
 
-    # 👶 Add one child automatically if room type is A1KB
     if room_type == "A1KB":
         no_of_children = 1
         child_age_bucket = "C1"
@@ -156,11 +181,8 @@ def generate_row(state, today=None):
         no_of_children = ""
         child_age_bucket = "C1"
 
-    # ⏰ Random ETA and ETD (ISO timestamps)
     eta = random_time_iso(arrival)
     etd = random_time_iso(departure)
-
-    # 🎯 Random Preferences
     preference = pick_preference()
 
     return {
