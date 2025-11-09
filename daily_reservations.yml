@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 🧠 Restore cached state so ExternalID continues correctly
+      # 🧠 Restore previous ExternalID state from cache
       - name: Restore state
         uses: actions/cache@v4
         with:
@@ -30,7 +30,7 @@ jobs:
           mkdir -p output state
           python generate_daily_reservations.py
 
-      # 💾 Save updated state so it persists between runs
+      # 💾 Save updated ExternalID state back into cache
       - name: Save state
         uses: actions/cache@v4
         with:
@@ -42,7 +42,7 @@ jobs:
         with:
           name: Daily-Reservations
           path: output/*.csv
-          retention-days: 14  # keep for 2 weeks
+          retention-days: 14
 
       - name: Email daily CSV
         uses: dawidd6/action-send-mail@v3
@@ -55,13 +55,12 @@ jobs:
           body: |
             Hello 👋  
 
-            Here is your automatically generated Reservations CSV for today.  
-            The file includes 100 reservations generated from your business rules.  
+            Here are your automatically generated Reservations CSV files for today.  
+            The ExternalID will continue sequentially across daily runs.  
 
-            You can also download it directly from the workflow run page under “Artifacts.”
+            You can also download them from “Artifacts” on the workflow run page.
 
-            Have a great day!  
             — Your Automated Booking Engine 🤖
           to: yourname@gmail.com
           from: ${{ secrets.MAIL_USERNAME }}
-          attachments: output/Reservations_*.csv
+          attachments: output/*.csv
