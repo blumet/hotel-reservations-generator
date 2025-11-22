@@ -58,6 +58,105 @@ jobs:
               gh.write(f"end={end}\n")
           PY
 
+      # 📊 Compute occupancy impact per arrival date (before vs after)
+      - name: Compute occupancy impact
+        id: occupancy_impact
+        run: |
+          python - << 'PY'
+          import csv, glob, os
+          from datetime import datetime
+
+          ROOM_COUNT = 179  # total rooms in hotel
+
+          # --- Load BoB (Business on the Books) ---
+          bob_path = "data/BusinessontheBooks.csv"
+          occ_map = {}  # date_iso -> occupancy %
+
+          try:
+              with open(bob_path, newline="", encoding="utf-8-sig") as f:
+                  reader = csv.reader(f)
+                  try:
+                      headers = next(reader)
+                  except StopIteration:
+                      reader = []
+                      headers = []
+                  if headers and len(headers) >= 6:
+                      date_idx = 0  # column A
+                      occ_idx = 5   # column F
+                      for row in reader:
+                          if len(row) <= occ_idx:
+                              continue
+                          date_str = (row[date_idx] or "").strip()
+                          occ_str = (row[occ_idx] or "").strip()
+                          if not date_str or not occ_str:
+                              continue
+                          occ_str = occ_str.replace(",", ".")
+                          try:
+                              occ = float(occ_str)
+                          except ValueError:
+                              continue
+                          dt = None
+                          for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+                              try:
+                                  dt = datetime.strptime(date_str, fmt).date()
+                                  break
+                              except ValueError:
+                                  continue
+                          if dt is None:
+                              continue
+                          iso = dt.strftime("%Y-%m-%d")
+                          occ_map[iso] = occ
+          except FileNotFoundError:
+              # No BoB file – then we can't compare, but we'll still report added reservations
+              occ_map = {}
+
+          # --- Load generated reservations and count arrivals per date ---
+          files = glob.glob("output/Reservations_*.csv")
+          if not files:
+              raise SystemExit("No reservations CSV found in output/")
+          latest = max(files)
+
+          arr_counts = {}  # date_iso -> number of new reservations
+          with open(latest, newline="", encoding="utf-8") as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  d = (row.get("arrivaldate") or "").strip()
+                  if not d:
+                      continue
+                  arr_counts[d] = arr_counts.get(d, 0) + 1
+
+          if not arr_counts:
+              summary_text = "No arrival dates found in generated reservations."
+          else:
+              # Build summary table
+              lines = []
+              lines.append("Date | Before% | Added | After%")
+              lines.append("-----|---------|-------|-------")
+
+              total_added = 0
+              for date_iso in sorted(arr_counts.keys()):
+                  added = arr_counts[date_iso]
+                  total_added += added
+                  before = occ_map.get(date_iso, 0.0)
+                  added_pct = (added / ROOM_COUNT) * 100.0
+                  after = before + added_pct
+                  if after > 100.0:
+                      after = 100.0
+                  lines.append(
+                      f"{date_iso} | {before:.1f}% | {added} | {after:.1f}%"
+                  )
+
+              lines.append("")
+              lines.append(f"Total simulated arrivals added: {total_added}")
+              summary_text = "\n".join(lines)
+
+          # Expose summary as a multiline output
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+              gh.write("summary<<EOF\n")
+              gh.write(summary_text)
+              gh.write("\nEOF\n")
+          PY
+
       # 💾 Save updated ExternalID state back into cache
       - name: Save state
         uses: actions/cache@v4
@@ -85,9 +184,12 @@ jobs:
 
             Here are your automatically generated Reservations CSV files for today.  
             Arrival dates in this file range from ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}.
-            The ExternalID will continue sequentially across daily runs.  
 
-            You can also download them from “Artifacts” on the workflow run page.
+            Occupancy impact per arrival date (based on 179 rooms):
+
+            ${{ steps.occupancy_impact.outputs.summary }}
+
+            You can also download the CSV from “Artifacts” on the workflow run page.
 
             — Your Automated Booking Engine 🤖
           to: yourname@gmail.com
