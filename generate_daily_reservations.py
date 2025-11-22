@@ -4,7 +4,9 @@ Generate a daily reservations CSV (499 rows) following business rules,
 using weighted room type distribution and persistent ExternalIDs.
 
 Now also uses an external Business-on-the-Books file from GitHub to
-bias arrivals towards low-occupancy dates (Column F = occupancy %).
+bias arrivals towards low-occupancy dates (Occupancy% column in PMS export).
+
+ExternalID/profile state is only persisted when the script is run with --commit.
 """
 
 from pathlib import Path
@@ -13,20 +15,22 @@ import random
 import json
 import csv
 from urllib.request import urlopen
+import argparse
 
 OUTPUT_DIR = Path("./output")
 STATE_DIR = Path("./state")
 STATE_FILE = STATE_DIR / "state.json"
 
-# URL of the PMS occupancy file stored in GitHub (Column F = occupancy %)
+# URL of the PMS occupancy file stored in GitHub
 OCCUPANCY_URL = (
     "https://raw.githubusercontent.com/blumet/hotel-reservations-generator/"
     "refs/heads/main/data/BusinessontheBooks.csv"
 )
-LOW_OCCUPANCY_THRESHOLD = 60.0  # percentage
+
+LOW_OCCUPANCY_THRESHOLD = 60.0  # percentage (days below this are "low occupancy")
 
 CONFIG = {
-    "external_id_start": 5007119,  # New starting ExternalID
+    "external_id_start": 5007119,  # ONLY used when state.json doesn't exist yet
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
@@ -80,15 +84,15 @@ def load_occupancy_data():
     """
     Download occupancy data from OCCUPANCY_URL and parse dates & occupancy %.
 
-    Assumptions:
-      - Column A (index 0) = date (DD/MM/YYYY from PMS export)
-      - Column F (index 5) = occupancy percentage
+    Assumptions (from your PMS export):
+      - Column 1 (index 1) = "Date" (DD/MM/YYYY)
+      - Column 5 (index 5) = "Occupancy%"
     """
     rows = []
     try:
         with urlopen(OCCUPANCY_URL) as resp:
             content = resp.read().decode("utf-8-sig")  # handle BOM if present
-    except Exception as exc:  # network fallback
+    except Exception as exc:
         print(f"⚠️ Could not load occupancy data from {OCCUPANCY_URL}: {exc}")
         return rows
 
@@ -99,11 +103,11 @@ def load_occupancy_data():
         return rows
 
     if len(headers) < 6:
-        print("⚠️ Occupancy CSV has fewer than 6 columns; cannot read column F.")
+        print("⚠️ Occupancy CSV has fewer than 6 columns; cannot read Occupancy%.")
         return rows
 
-    date_idx = 0      # Column A
-    occ_idx = 5       # Column F (as requested)
+    date_idx = 1  # "Date" column
+    occ_idx = 5   # "Occupancy%" column
 
     for row in reader:
         if len(row) <= occ_idx:
@@ -114,25 +118,24 @@ def load_occupancy_data():
         if not date_str or not occ_str:
             continue
 
-        # Normalize decimal separator just in case
         occ_str = occ_str.replace(",", ".")
         try:
             occupancy = float(occ_str)
         except ValueError:
             continue
 
-        # Try DD/MM/YYYY (typical PMS export), fall back to YYYY-MM-DD
-        date_obj = None
+        # Try DD/MM/YYYY, fallback to YYYY-MM-DD
+        dt = None
         for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
             try:
-                date_obj = datetime.strptime(date_str, fmt).date()
+                dt = datetime.strptime(date_str, fmt).date()
                 break
             except ValueError:
                 continue
-        if date_obj is None:
+        if dt is None:
             continue
 
-        rows.append({"date": date_obj, "occupancy": occupancy})
+        rows.append({"date": dt, "occupancy": occupancy})
 
     return rows
 
@@ -181,6 +184,7 @@ def load_state():
     if STATE_FILE.exists():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+    # First ever run: start from CONFIG
     return {"last_external_id": CONFIG["external_id_start"], "next_profile_index": 0}
 
 def save_state(state):
@@ -213,7 +217,7 @@ def random_time_iso(date_obj):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 # ------------------------------------------------------------
-# Helper: arrival date using occupancy data (with fallback)
+# Helper: arrival date (prefer low-occupancy days, fallback to CONFIG)
 # ------------------------------------------------------------
 
 def pick_arrival_date(today):
@@ -267,7 +271,6 @@ def pick_rate_and_company(room_type):
     if room_type in {"KCDX", "TCDX", "KCST"}:
         return "BAREX", ""
     rate = random.choice(RATE_CODES_POOL)
-    # Example COR25 logic retained from your original script
     if rate == "COR25":
         company = random.choice(["Deloitte", "Saudi Aramco", "GrupoACS", "Volkswagen"])
     else:
@@ -353,10 +356,18 @@ def generate_row(state, today=None):
     }
 
 # ------------------------------------------------------------
-# Main CSV generator
+# Main CSV generator (with --commit flag)
 # ------------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--commit",
+        action="store_true",
+        help="Persist updated ExternalID/profile state after generating.",
+    )
+    args = parser.parse_args()
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -378,7 +389,6 @@ def main():
         "AdditionalExternalSystems","ExternalSegmentNumber","BlockCode"
     ]
 
-    # Generate 499 reservations
     rows = [generate_row(state, today=today) for _ in range(499)]
 
     with open(out_path, "w", newline="", encoding="utf-8") as f:
@@ -386,9 +396,14 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    save_state(state)
     print(f"✅ Generated {len(rows)} reservations -> {out_path}")
-    print(f"🔢 Last ExternalID used: {state['last_external_id']}")
+    print(f"🔢 Last ExternalID used in this file: {state['last_external_id']}")
+
+    if args.commit:
+        save_state(state)
+        print("💾 State committed (future runs will continue from this ExternalID).")
+    else:
+        print("ℹ️ TEST RUN: state NOT saved. To update ExternalID state, run with --commit.")
 
 if __name__ == "__main__":
     main()
