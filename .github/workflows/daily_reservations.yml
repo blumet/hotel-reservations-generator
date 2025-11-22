@@ -52,131 +52,11 @@ jobs:
           dates = sorted(set(dates))
           start, end = dates[0], dates[-1]
 
+          # Expose as step outputs
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
               gh.write(f"start={start}\n")
               gh.write(f"end={end}\n")
           PY
-
-      # 📊 Compute occupancy impact and build the email body
-      - name: Build email body with occupancy impact
-        id: build_body
-        run: |
-          python - << 'PY'
-          import csv, glob, os
-          from datetime import datetime
-
-          ROOM_COUNT = 179  # total rooms in hotel
-
-          # --- Load BoB (Business on the Books) ---
-          bob_path = "data/BusinessontheBooks.csv"
-          occ_map = {}  # date_iso -> occupancy %
-
-          try:
-              with open(bob_path, newline="", encoding="utf-8-sig") as f:
-                  reader = csv.reader(f)
-                  try:
-                      headers = next(reader)
-                  except StopIteration:
-                      headers = []
-                  if headers and len(headers) >= 6:
-                      # Column 1 = "Date", column 5 = "Occupancy%"
-                      date_idx = 1   # column B = Date
-                      occ_idx = 5    # column F = Occupancy%
-                      for row in reader:
-                          if len(row) <= occ_idx:
-                              continue
-                          date_str = (row[date_idx] or "").strip()
-                          occ_str = (row[occ_idx] or "").strip()
-                          if not date_str or not occ_str:
-                              continue
-
-                          occ_str = occ_str.replace(",", ".")
-                          try:
-                              occ = float(occ_str)
-                          except ValueError:
-                              continue
-
-                          dt = None
-                          for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
-                              try:
-                                  dt = datetime.strptime(date_str, fmt).date()
-                                  break
-                              except ValueError:
-                                  continue
-                          if dt is None:
-                              continue
-
-                          iso = dt.strftime("%Y-%m-%d")
-                          occ_map[iso] = occ
-          except FileNotFoundError:
-              occ_map = {}
-
-          # --- Load generated reservations & count arrivals per date ---
-          files = glob.glob("output/Reservations_*.csv")
-          if not files:
-              raise SystemExit("No reservations CSV found in output/")
-          latest = max(files)
-
-          arr_counts = {}  # date_iso -> number of new reservations
-          with open(latest, newline="", encoding="utf-8") as f:
-              reader = csv.DictReader(f)
-              for row in reader:
-                  d = (row.get("arrivaldate") or "").strip()
-                  if not d:
-                      continue
-                  arr_counts[d] = arr_counts.get(d, 0) + 1
-
-          # --- Build occupancy impact table ---
-          if not arr_counts:
-              summary_text = "No arrival dates found in generated reservations."
-          else:
-              lines = []
-              lines.append("Date | Before% | Added | After%")
-              lines.append("-----|---------|-------|-------")
-              total_added = 0
-
-              for date_iso in sorted(arr_counts.keys()):
-                  added = arr_counts[date_iso]
-                  total_added += added
-                  before = occ_map.get(date_iso, 0.0)
-                  added_pct = (added / ROOM_COUNT) * 100.0
-                  after = before + added_pct
-                  if after > 100.0:
-                      after = 100.0
-                  lines.append(f"{date_iso} | {before:.1f}% | {added} | {after:.1f}%")
-
-              lines.append("")
-              lines.append(f"Total simulated arrivals added: {total_added}")
-              summary_text = "\n".join(lines)
-
-          # --- Build full email body text ---
-          start = os.environ.get("ARR_START", "")
-          end = os.environ.get("ARR_END", "")
-
-          # We'll just use placeholders; the subject already has the real values
-          body = f"""Hello 👋  
-
-Here are your automatically generated Reservations CSV files for today.  
-Arrival dates in this file range from {start} to {end}.
-
-Occupancy impact per arrival date (based on {ROOM_COUNT} rooms):
-
-{summary_text}
-
-You can also download the CSV from “Artifacts” on the workflow run page.
-
-— Your Automated Booking Engine 🤖
-"""
-
-          # Expose as env var for the next step
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write("EMAIL_BODY<<EOF\n")
-              env.write(body)
-              env.write("\nEOF\n")
-          PY
-        env:
-          ARR_START: ${{ steps.arrival_range.outputs.start }}
-          ARR_END: ${{ steps.arrival_range.outputs.end }}
 
       # 💾 Save updated ExternalID state back into cache
       - name: Save state
@@ -200,7 +80,15 @@ You can also download the CSV from “Artifacts” on the workflow run page.
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
           subject: "Daily Reservations CSV - arrivals ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}"
-          body: ${{ env.EMAIL_BODY }}
-          to: yourname@gmail.com        # 🔁 change to your real email
+          body: |
+            Hello 👋  
+
+            Here are your automatically generated Reservations CSV files for today.  
+            Arrival dates in this file range from ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}.
+
+            You can also download them from “Artifacts” on the workflow run page.
+
+            — Your Automated Booking Engine 🤖
+          to: yourname@gmail.com
           from: ${{ secrets.MAIL_USERNAME }}
           attachments: "output/*.csv"
