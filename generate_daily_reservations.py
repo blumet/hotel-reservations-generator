@@ -2,6 +2,9 @@
 """
 Generate a daily reservations CSV (499 rows) following business rules,
 using weighted room type distribution and persistent ExternalIDs.
+
+Now also uses an external Business-on-the-Books file from GitHub to
+bias arrivals towards low-occupancy dates (Column F = Occupancy%).
 """
 
 from pathlib import Path
@@ -9,17 +12,25 @@ from datetime import datetime, timedelta, time
 import random
 import json
 import csv
+from urllib.request import urlopen
 
 OUTPUT_DIR = Path("./output")
 STATE_DIR = Path("./state")
 STATE_FILE = STATE_DIR / "state.json"
+
+# URL of the PMS occupancy file stored in GitHub (Column F = Occupancy%)
+OCCUPANCY_URL = (
+    "https://raw.githubusercontent.com/blumet/hotel-reservations-generator/"
+    "refs/heads/main/data/BusinessontheBooks.csv"
+)
+LOW_OCCUPANCY_THRESHOLD = 60.0  # percentage
 
 CONFIG = {
     "external_id_start": 5007119,  # New starting ExternalID
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
-    "date_distribution": {  # Adjustable weighted random date periods
+    "date_distribution": {  # Fallback: weighted random date periods
         "next_30_days": 0.5,   # 50%
         "next_60_days": 0.2,   # 20%
         "next_90_days": 0.2,   # 20%
@@ -62,213 +73,52 @@ PREFERENCE_CODES = [
 ]
 
 # ------------------------------------------------------------
-# State handling (persistent tracking for ExternalID and ProfileID)
+# Occupancy handling: load low-occupancy days from external CSV
 # ------------------------------------------------------------
 
-def build_profile_cycle():
-    s1 = list(range(CONFIG["profile_set_1"][0], CONFIG["profile_set_1"][1] + 1))
-    s2 = list(range(CONFIG["profile_set_2"][0], CONFIG["profile_set_2"][1] + 1))
-    return sorted(s1 + s2)
+def load_occupancy_data():
+    """Download occupancy data from OCCUPANCY_URL and parse dates & Occupancy%."""
+    rows = []
+    try:
+        with urlopen(OCCUPANCY_URL) as resp:
+            content = resp.read().decode("utf-8-sig")  # handle BOM if present
+    except Exception as exc:  # network fallback
+        print(f"⚠️ Could not load occupancy data from {OCCUPANCY_URL}: {exc}")
+        return rows
 
-PROFILE_CYCLE = build_profile_cycle()
+    reader = csv.DictReader(content.splitlines())
+    for row in reader:
+        date_str = (row.get("Date") or "").strip()
+        occ_str = (row.get("Occupancy%") or "").strip()
+        if not date_str or not occ_str:
+            continue
 
-def load_state():
-    """Load state from file, or initialize if missing."""
-    if STATE_FILE.exists():
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"last_external_id": CONFIG["external_id_start"], "next_profile_index": 0}
+        # Normalize decimal separator just in case
+        occ_str = occ_str.replace(",", ".")
+        try:
+            occupancy = float(occ_str)
+        except ValueError:
+            continue
 
-def save_state(state):
-    """Save state persistently."""
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+        # PMS export uses DD/MM/YYYY
+        try:
+            date_obj = datetime.strptime(date_str, "%d/%m/%Y").date()
+        except ValueError:
+            continue
 
-def next_external_id(state):
-    """Generate next sequential ExternalID."""
-    state["last_external_id"] += 1
-    return state["last_external_id"]
+        rows.append({"date": date_obj, "occupancy": occupancy})
 
-def next_profile_id(state):
-    """Cycle through available profile IDs."""
-    idx = state["next_profile_index"]
-    pid = PROFILE_CYCLE[idx]
-    state["next_profile_index"] = (idx + 1) % len(PROFILE_CYCLE)
-    return pid
+    return rows
 
-# ------------------------------------------------------------
-# Helper: random time in ISO format for ETA/ETD
-# ------------------------------------------------------------
 
-def random_time_iso(date_obj):
-    """Return ISO 8601 timestamp with random time between 05:00 and 23:45."""
-    hour = random.randint(5, 23)
-    minute = random.choice([0, 15, 30, 45])
-    dt = datetime.combine(date_obj, time(hour, minute))
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+def compute_low_occupancy(threshold=LOW_OCCUPANCY_THRESHOLD):
+    """Return (dates, weights) for days below the given occupancy threshold."""
+    data = load_occupancy_data()
+    if not data:
+        return [], []
 
-# ------------------------------------------------------------
-# Helper: weighted arrival date based on CONFIG
-# ------------------------------------------------------------
+    low_days = [entry for entry in data if entry["occupancy"] < threshold]
 
-def pick_arrival_date(today):
-    """Select a random arrival date based on weighted probabilities."""
-    dist = CONFIG["date_distribution"]
-    roll = random.random()
-    cumulative = 0
-
-    if roll < (cumulative := cumulative + dist["next_30_days"]):
-        start, end = 1, 30
-    elif roll < (cumulative := cumulative + dist["next_60_days"]):
-        start, end = 31, 60
-    elif roll < (cumulative := cumulative + dist["next_90_days"]):
-        start, end = 61, 90
-    else:
-        start, end = 91, 120
-
-    return today + timedelta(days=random.randint(start, end))
-
-# ------------------------------------------------------------
-# Room type picker (weighted)
-# ------------------------------------------------------------
-
-def pick_room_type():
-    """Randomly select a room type using weighted probabilities."""
-    room_types = list(CONFIG["room_distribution"].keys())
-    weights = list(CONFIG["room_distribution"].values())
-    return random.choices(room_types, weights=weights, k=1)[0]
-
-# ------------------------------------------------------------
-# Business logic for rates, companies, preferences
-# ------------------------------------------------------------
-
-def pick_rate_and_company(room_type):
-    """Assign rate plan and company based on room type and business rules."""
-    if room_type in {"KCDX", "TCDX", "KCST"}:
-        return "BAREX", ""
-    rate = random.choice(RATE_CODES_POOL)
-    if rate == "COR25":
-        company = random.choice(["Deloitte", "Saudi Aramco", "GrupoACS", "Volkswagen"])
-    else:
-        company = random.choice(COMPANIES) if random.random() < 0.7 else ""
-    return rate, company
-
-def pick_preference():
-    """Randomly choose one preference code or leave blank."""
-    if random.random() < 0.4:
-        return random.choice(PREFERENCE_CODES)
-    return ""
-
-# ------------------------------------------------------------
-# Row generator
-# ------------------------------------------------------------
-
-def generate_row(state, today=None):
-    if today is None:
-        today = datetime.today().date()
-
-    arrival = pick_arrival_date(today)
-    stay_len = random.randint(1, 10)
-    departure = arrival + timedelta(days=stay_len)
-    room_type = pick_room_type()
-    rate, company = pick_rate_and_company(room_type)
-
-    if room_type == "A1KB":
-        no_of_children = 1
-        child_age_bucket = "C1"
-    else:
-        no_of_children = ""
-        child_age_bucket = "C1"
-
-    eta = random_time_iso(arrival)
-    etd = random_time_iso(departure)
-    preference = pick_preference()
-
-    return {
-        "profileId": next_profile_id(state),
-        "arrivaldate": arrival.strftime("%Y-%m-%d"),
-        "departuredate": departure.strftime("%Y-%m-%d"),
-        "RoomType": room_type,
-        "Room": "",
-        "DoNotMove": "",
-        "AdultAgeBucket": "A1",
-        "NoOfAdults": random.choice([1, 2]),
-        "ChildAgeBucket": child_age_bucket,
-        "NoOfChildren": no_of_children,
-        "RoomTypeToCharge": room_type,
-        "RatePlan": rate,
-        "CurrencyCode": "EUR",
-        "MarketSegment": random.choice(MARKET_SEGMENTS),
-        "GuaranteeType": random.choice(GUARANTEE_TYPES),
-        "Channel": random.choice(CHANNELS),
-        "Source": random.choice(SOURCES),
-        "companyProfile": company,
-        "TravelAgentProfile": "",
-        "Preferences": preference,
-        "AccompanyingGuestProfiles": "",
-        "Membership": "",
-        "ETA": eta,
-        "ETD": etd,
-        "TotalAmount": "",
-        "BreakdownAmount": "",
-        "Purpose": "",
-        "NoPost": "FALSE",
-        "ArrivalTransportType": "",
-        "ArrivalFlightNumber": "",
-        "ArrivalPickUpDateTime": "",
-        "ArrivalDetails": "",
-        "DepartureTransportType": "",
-        "DepartureFlightNumber": "",
-        "DeparturePickUpDateTime": "",
-        "DepartureDetails": "",
-        "GroupCode": "",
-        "LockPrice": "",
-        "LockReason": "",
-        "ExternalID": next_external_id(state),
-        "ExternalSystemCode": "PMS",
-        "AdditionalExternalSystems": "",
-        "ExternalSegmentNumber": "",
-        "BlockCode": ""
-    }
-
-# ------------------------------------------------------------
-# Main CSV generator
-# ------------------------------------------------------------
-
-def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-
-    state = load_state()
-    today = datetime.today().date()
-
-    out_name = f"Reservations_{today.strftime('%Y%m%d')}.csv"
-    out_path = OUTPUT_DIR / out_name
-
-    columns = [
-        "profileId","arrivaldate","departuredate","RoomType","Room","DoNotMove",
-        "AdultAgeBucket","NoOfAdults","ChildAgeBucket","NoOfChildren","RoomTypeToCharge",
-        "RatePlan","CurrencyCode","MarketSegment","GuaranteeType","Channel","Source",
-        "companyProfile","TravelAgentProfile","Preferences","AccompanyingGuestProfiles",
-        "Membership","ETA","ETD","TotalAmount","BreakdownAmount","Purpose","NoPost",
-        "ArrivalTransportType","ArrivalFlightNumber","ArrivalPickUpDateTime","ArrivalDetails",
-        "DepartureTransportType","DepartureFlightNumber","DeparturePickUpDateTime","DepartureDetails",
-        "GroupCode","LockPrice","LockReason","ExternalID","ExternalSystemCode",
-        "AdditionalExternalSystems","ExternalSegmentNumber","BlockCode"
-    ]
-
-    # 🔢 Generate 499 reservations instead of 100
-    rows = [generate_row(state, today=today) for _ in range(499)]
-
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(rows)
-
-    save_state(state)
-    print(f"✅ Generated {len(rows)} reservations -> {out_path}")
-    print(f"🔢 Last ExternalID used: {state['last_external_id']}")
-
-if __name__ == "__main__":
-    main()
+    # If nothing is strictly below threshold, fall back to using all days
+    if not low_days:
+        low_days = data
