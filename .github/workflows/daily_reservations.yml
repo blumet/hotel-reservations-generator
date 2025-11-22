@@ -18,36 +18,78 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Run reservation generator
+      # 🧠 Restore previous ExternalID state from cache
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: reservation-state
+
+      - name: Run your script
         run: |
           mkdir -p output state
           python generate_daily_reservations.py
 
-      - name: Upload generated CSV
+      # 🔎 Extract min/max arrival dates from the generated CSV
+      - name: Extract arrival date range
+        id: arrival_range
+        run: |
+          python - << 'PY'
+          import csv, glob, os
+
+          files = glob.glob("output/Reservations_*.csv")
+          if not files:
+              raise SystemExit("No reservations CSV found in output/")
+
+          latest = max(files)  # pick the latest by filename
+          with open(latest, newline="", encoding="utf-8") as f:
+              reader = csv.DictReader(f)
+              dates = [row["arrivaldate"] for row in reader if row.get("arrivaldate")]
+
+          if not dates:
+              raise SystemExit("No arrivaldate values found in CSV")
+
+          dates = sorted(set(dates))
+          start, end = dates[0], dates[-1]
+
+          # Expose as step outputs
+          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+              gh.write(f"start={start}\n")
+              gh.write(f"end={end}\n")
+          PY
+
+      # 💾 Save updated ExternalID state back into cache
+      - name: Save state
+        uses: actions/cache@v4
+        with:
+          path: state
+          key: reservation-state
+
+      - name: Upload CSV as artifact
         uses: actions/upload-artifact@v4
         with:
           name: Daily-Reservations
           path: output/*.csv
           retention-days: 14
 
-      - name: Send CSV by email
+      - name: Email daily CSV
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
           server_port: 465
           username: ${{ secrets.MAIL_USERNAME }}
           password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "Daily Reservations CSV - $(date +'%Y-%m-%d')"
+          subject: "Daily Reservations CSV - arrivals ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}"
           body: |
             Hello 👋  
 
-            Here is your automatically generated Reservations CSV for today.  
-            The file includes 100 reservations generated from your business rules.  
+            Here are your automatically generated Reservations CSV files for today.  
+            Arrival dates in this file range from ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}.
+            The ExternalID will continue sequentially across daily runs.  
 
-            You can also download it directly from the workflow run page under “Artifacts.”
+            You can also download them from “Artifacts” on the workflow run page.
 
-            Have a great day!  
             — Your Automated Booking Engine 🤖
           to: yourname@gmail.com
           from: ${{ secrets.MAIL_USERNAME }}
-          attachments: output/Reservations_*.csv
+          attachments: "output/*.csv"
