@@ -63,4 +63,4 @@ jobs:
             — Your Automated Booking Engine 🤖
           to: yourname@gmail.com
           from: ${{ secrets.MAIL_USERNAME }}
-          attachments: output/*.csv
+          attachments: "output/*.csv"
