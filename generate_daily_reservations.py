@@ -15,7 +15,7 @@ STATE_DIR = Path("./state")
 STATE_FILE = STATE_DIR / "state.json"
 
 CONFIG = {
-    "external_id_start": 5006420,  # New starting ExternalID
+    "external_id_start": 5006620,  # New starting ExternalID
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
