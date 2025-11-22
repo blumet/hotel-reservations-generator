@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate a daily reservations CSV (100 rows) following business rules,
+Generate a daily reservations CSV (499 rows) following business rules,
 using weighted room type distribution and persistent ExternalIDs.
 """
 
@@ -15,17 +15,17 @@ STATE_DIR = Path("./state")
 STATE_FILE = STATE_DIR / "state.json"
 
 CONFIG = {
-    "external_id_start": 5006420,  # ✅ New starting ExternalID
+    "external_id_start": 5006420,  # New starting ExternalID
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
-    "date_distribution": {  # 🔧 Adjustable weighted random date periods
+    "date_distribution": {  # Adjustable weighted random date periods
         "next_30_days": 0.5,   # 50%
         "next_60_days": 0.2,   # 20%
         "next_90_days": 0.2,   # 20%
         "next_120_days": 0.1   # 10%
     },
-    "room_distribution": {  # 🎯 Weighted room type probabilities
+    "room_distribution": {  # Weighted room type probabilities
         "KGDX": 0.30,
         "TWDX": 0.20,
         "KGSP": 0.10,
@@ -258,7 +258,8 @@ def main():
         "AdditionalExternalSystems","ExternalSegmentNumber","BlockCode"
     ]
 
-    rows = [generate_row(state, today=today) for _ in range(100)]
+    # 🔢 Generate 499 reservations instead of 100
+    rows = [generate_row(state, today=today) for _ in range(499)]
 
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=columns)
