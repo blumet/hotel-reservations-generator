@@ -26,7 +26,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: state
-          key: reservation-state
+          key: reservation-state-v3
 
       - name: Run generator script
         run: |
@@ -71,7 +71,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: state
-          key: reservation-state
+          key: reservation-state-v3
 
       - name: Upload CSV as artifact
         uses: actions/upload-artifact@v4
