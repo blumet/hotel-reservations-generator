@@ -1,9 +1,12 @@
 name: Daily Reservations Generator
 
 on:
-  schedule:
-    - cron: '0 1 * * *'  # runs every day at 1:00 AM UTC
-  workflow_dispatch:      # allows manual runs
+  workflow_dispatch:
+    inputs:
+      commit_state:
+        description: "Persist ExternalID/profile state after this run?"
+        required: true
+        default: "true"
 
 jobs:
   generate:
@@ -18,19 +21,25 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 🧠 Restore previous ExternalID state from cache
+      # 🧠 Restore previous ExternalID/profile state from cache
       - name: Restore state
         uses: actions/cache@v4
         with:
           path: state
           key: reservation-state
 
-      - name: Run your script
+      - name: Run generator script
         run: |
           mkdir -p output state
-          python generate_daily_reservations.py
+          if [ "${{ github.event.inputs.commit_state }}" = "true" ]; then
+            echo "Running with --commit (state will be updated)..."
+            python generate_daily_reservations.py --commit
+          else
+            echo "Running without --commit (TEST RUN, state will NOT change)..."
+            python generate_daily_reservations.py
+          fi
 
-      # 🔎 Extract min/max arrival dates from the generated CSV
+      # 🔎 Extract min/max arrival dates from the generated CSV (for email subject/body)
       - name: Extract arrival date range
         id: arrival_range
         run: |
@@ -52,13 +61,12 @@ jobs:
           dates = sorted(set(dates))
           start, end = dates[0], dates[-1]
 
-          # Expose as step outputs
           with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
               gh.write(f"start={start}\n")
               gh.write(f"end={end}\n")
           PY
 
-      # 💾 Save updated ExternalID state back into cache
+      # 💾 Save updated state back into cache (only changed when --commit was used)
       - name: Save state
         uses: actions/cache@v4
         with:
@@ -83,12 +91,14 @@ jobs:
           body: |
             Hello 👋  
 
-            Here are your automatically generated Reservations CSV files for today.  
+            Here are your automatically generated Reservations CSV files for this run.  
             Arrival dates in this file range from ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}.
 
-            You can also download them from “Artifacts” on the workflow run page.
+            Note: ExternalID/profile state was set to "commit_state=${{ github.event.inputs.commit_state }}".
+
+            You can also download the CSV from “Artifacts” on the workflow run page.
 
             — Your Automated Booking Engine 🤖
-          to: yourname@gmail.com
+          to: yourname@gmail.com          # ← replace with your real email or a secret
           from: ${{ secrets.MAIL_USERNAME }}
           attachments: "output/*.csv"
