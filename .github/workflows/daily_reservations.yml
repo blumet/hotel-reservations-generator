@@ -69,46 +69,47 @@ jobs:
           ROOM_COUNT = 179  # total rooms in hotel
 
           # --- Load BoB (Business on the Books) ---
-          bob_path = "data/BusinessontheBooks.csv"
-          occ_map = {}  # date_iso -> occupancy %
+bob_path = "data/BusinessontheBooks.csv"
+occ_map = {}  # date_iso -> occupancy %
 
-          try:
-              with open(bob_path, newline="", encoding="utf-8-sig") as f:
-                  reader = csv.reader(f)
-                  try:
-                      headers = next(reader)
-                  except StopIteration:
-                      reader = []
-                      headers = []
-                  if headers and len(headers) >= 6:
-                      date_idx = 0  # column A
-                      occ_idx = 5   # column F
-                      for row in reader:
-                          if len(row) <= occ_idx:
-                              continue
-                          date_str = (row[date_idx] or "").strip()
-                          occ_str = (row[occ_idx] or "").strip()
-                          if not date_str or not occ_str:
-                              continue
-                          occ_str = occ_str.replace(",", ".")
-                          try:
-                              occ = float(occ_str)
-                          except ValueError:
-                              continue
-                          dt = None
-                          for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
-                              try:
-                                  dt = datetime.strptime(date_str, fmt).date()
-                                  break
-                              except ValueError:
-                                  continue
-                          if dt is None:
-                              continue
-                          iso = dt.strftime("%Y-%m-%d")
-                          occ_map[iso] = occ
-          except FileNotFoundError:
-              # No BoB file – then we can't compare, but we'll still report added reservations
-              occ_map = {}
+try:
+    with open(bob_path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        try:
+            headers = next(reader)
+        except StopIteration:
+            reader = []
+            headers = []
+        if headers and len(headers) >= 6:
+            date_idx = 1   # FIXED → column B = Date
+            occ_idx = 5    # column F = Occupancy%
+            for row in reader:
+                if len(row) <= occ_idx:
+                    continue
+
+                date_str = (row[date_idx] or "").strip()
+                occ_str = (row[occ_idx] or "").strip()
+                if not date_str or not occ_str:
+                    continue
+
+                occ_str = occ_str.replace(",", ".")
+                try:
+                    occ = float(occ_str)
+                except ValueError:
+                    continue
+
+                dt = None
+                for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+                    try:
+                        dt = datetime.strptime(date_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                if dt is None:
+                    continue
+
+                iso = dt.strftime("%Y-%m-%d")
+                occ_map[iso] = occ
 
           # --- Load generated reservations and count arrivals per date ---
           files = glob.glob("output/Reservations_*.csv")
