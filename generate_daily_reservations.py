@@ -20,10 +20,10 @@ CONFIG = {
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
     "date_distribution": {  # Adjustable weighted random date periods
-        "next_60_days": 0.5,   # 50%
+        "next_30_days": 0.5,   # 50%
+        "next_60_days": 0.2,   # 20%
         "next_90_days": 0.2,   # 20%
-        "next_120_days": 0.2,   # 20%
-        "next_150_days": 0.1   # 10%
+        "next_120_days": 0.1   # 10%
     },
     "room_distribution": {  # Weighted room type probabilities
         "KGDX": 0.30,
