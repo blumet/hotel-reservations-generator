@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
 Generate a daily reservations CSV (499 rows) following business rules,
-using weighted room type distribution and persistent ExternalIDs.
+using weighted room type distribution, PMS occupancy bias,
+and persistent ExternalIDs.
 
-Now also uses an external Business-on-the-Books file from GitHub to
-bias arrivals towards low-occupancy dates (Occupancy% column in PMS export).
-
-ExternalID/profile state is only persisted when the script is run with --commit.
+ExternalID/profile state is stored in state.json and updated on every run.
 """
 
 from pathlib import Path
@@ -15,7 +13,6 @@ import random
 import json
 import csv
 from urllib.request import urlopen
-import argparse
 
 OUTPUT_DIR = Path("./output")
 STATE_DIR = Path("./state")
@@ -30,7 +27,9 @@ OCCUPANCY_URL = (
 LOW_OCCUPANCY_THRESHOLD = 60.0  # percentage (days below this are "low occupancy")
 
 CONFIG = {
-    "external_id_start": 5007119,  # ONLY used when state.json doesn't exist yet
+    # Used ONLY when state.json doesn't exist yet.
+    # First generated ExternalID will be external_id_start + 1.
+    "external_id_start": 5007119,
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
@@ -193,7 +192,7 @@ def load_state():
     return {"last_external_id": CONFIG["external_id_start"], "next_profile_index": 0}
 
 def save_state(state):
-    """Save state persistently."""
+    """Save state persistently on every run."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
@@ -380,18 +379,10 @@ def generate_row(state, today=None):
     }
 
 # ------------------------------------------------------------
-# Main CSV generator (with --commit flag)
+# Main CSV generator
 # ------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--commit",
-        action="store_true",
-        help="Persist updated ExternalID/profile state after generating.",
-    )
-    args = parser.parse_args()
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -420,14 +411,11 @@ def main():
         writer.writeheader()
         writer.writerows(rows)
 
-    print(f"✅ Generated {len(rows)} reservations -> {out_path}")
-    print(f"🔢 Last ExternalID used in this file: {state['last_external_id']}")
+    # Always persist state at the end
+    save_state(state)
 
-    if args.commit:
-        save_state(state)
-        print("💾 State committed (future runs will continue from this ExternalID).")
-    else:
-        print("ℹ️ TEST RUN: state NOT saved. To update ExternalID state, run with --commit.")
+    print(f"✅ Generated {len(rows)} reservations -> {out_path}")
+    print(f"🔢 Last ExternalID now stored in state.json: {state['last_external_id']}")
 
 if __name__ == "__main__":
     main()
