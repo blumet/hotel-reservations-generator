@@ -66,7 +66,8 @@ COMPANIES = [
     "ABN Amro", "CNN News Group", "BMW", "Deloitte"
 ]
 
-RATE_CODES_POOL = ["BAR00", "BAR10", "OTA1", "CORL25", "OPQ", "DAY", "BARAD", "RACK"]
+# Rate pool (BARRES added)
+RATE_CODES_POOL = ["BAR00", "BAR10", "OTA1", "CORL25", "OPQ", "DAY", "BARAD", "RACK", "BARRES"]
 if CONFIG["allow_COR25"]:
     RATE_CODES_POOL.append("COR25")
 
@@ -168,6 +169,10 @@ def compute_low_occupancy(threshold=LOW_OCCUPANCY_THRESHOLD):
 
 LOW_OCCUPANCY_DATES, LOW_OCCUPANCY_WEIGHTS = compute_low_occupancy()
 
+# Map of date -> occupancy% for easy lookup (used for >85% rule)
+_OCC_DATA = load_occupancy_data()
+OCCUPANCY_BY_DATE = {entry["date"]: entry["occupancy"] for entry in _OCC_DATA}
+
 # ------------------------------------------------------------
 # State handling (persistent tracking for ExternalID and ProfileID)
 # ------------------------------------------------------------
@@ -265,16 +270,35 @@ def pick_room_type():
 # Business logic for rates, companies, preferences
 # ------------------------------------------------------------
 
-def pick_rate_and_company(room_type):
-    """Assign rate plan and company based on room type and business rules."""
-    # BAREX exclusively for KCDX, TCDX, KCST
+def pick_rate_and_company(room_type, arrival_date):
+    """
+    Assign rate plan and company based on:
+    - Room type (BAREX for KCDX/TCDX/KCST)
+    - Occupancy% for the arrival date (>85% → only RACK/BARRES/BAR00)
+    - Normal rate pool otherwise
+    """
+    # Rule 1: BAREX exclusively for certain room types
     if room_type in {"KCDX", "TCDX", "KCST"}:
         return "BAREX", ""
-    rate = random.choice(RATE_CODES_POOL)
+
+    # Look up occupancy for the arrival date, if available
+    occupancy = OCCUPANCY_BY_DATE.get(arrival_date)
+
+    if occupancy is not None and occupancy > 85:
+        # High occupancy: restrict rate codes
+        candidate_pool = ["RACK", "BARRES", "BAR00"]
+    else:
+        # Normal day: full rate pool
+        candidate_pool = RATE_CODES_POOL
+
+    rate = random.choice(candidate_pool)
+
+    # Corporate rule for COR25 (if ever allowed in RATE_CODES_POOL)
     if rate == "COR25":
         company = random.choice(["Deloitte", "Saudi Aramco", "GrupoACS", "Volkswagen"])
     else:
         company = random.choice(COMPANIES) if random.random() < 0.7 else ""
+
     return rate, company
 
 def pick_preference():
@@ -295,7 +319,7 @@ def generate_row(state, today=None):
     stay_len = random.randint(1, 10)
     departure = arrival + timedelta(days=stay_len)
     room_type = pick_room_type()
-    rate, company = pick_rate_and_company(room_type)
+    rate, company = pick_rate_and_company(room_type, arrival)
 
     if room_type == "A1KB":
         no_of_children = 1
