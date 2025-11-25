@@ -1,12 +1,7 @@
-name: Daily Reservations Generator
+name: Daily Reservations (On-Demand)
 
 on:
-  workflow_dispatch:
-    inputs:
-      commit_state:
-        description: "Persist ExternalID/profile state after this run?"
-        required: true
-        default: "true"
+  workflow_dispatch:  # manual trigger only
 
 jobs:
   generate:
@@ -21,84 +16,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 🧠 Restore previous ExternalID/profile state from cache
-      - name: Restore state
-        uses: actions/cache@v4
-        with:
-          path: state
-          key: reservation-state-v3
-
-      - name: Run generator script
+      - name: Run reservations generator
         run: |
           mkdir -p output state
-          if [ "${{ github.event.inputs.commit_state }}" = "true" ]; then
-            echo "Running with --commit (state will be updated)..."
-            python generate_daily_reservations.py --commit
-          else
-            echo "Running without --commit (TEST RUN, state will NOT change)..."
-            python generate_daily_reservations.py
-          fi
-
-      # 🔎 Extract min/max arrival dates from the generated CSV (for email subject/body)
-      - name: Extract arrival date range
-        id: arrival_range
-        run: |
-          python - << 'PY'
-          import csv, glob, os
-
-          files = glob.glob("output/Reservations_*.csv")
-          if not files:
-              raise SystemExit("No reservations CSV found in output/")
-
-          latest = max(files)  # pick the latest by filename
-          with open(latest, newline="", encoding="utf-8") as f:
-              reader = csv.DictReader(f)
-              dates = [row["arrivaldate"] for row in reader if row.get("arrivaldate")]
-
-          if not dates:
-              raise SystemExit("No arrivaldate values found in CSV")
-
-          dates = sorted(set(dates))
-          start, end = dates[0], dates[-1]
-
-          with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
-              gh.write(f"start={start}\n")
-              gh.write(f"end={end}\n")
-          PY
-
-      # 💾 Save updated state back into cache (only changed when --commit was used)
-      - name: Save state
-        uses: actions/cache@v4
-        with:
-          path: state
-          key: reservation-state-v3
+          python generate_daily_reservations.py
 
       - name: Upload CSV as artifact
         uses: actions/upload-artifact@v4
         with:
           name: Daily-Reservations
-          path: output/*.csv
+          path: output/Reservations_*.csv
           retention-days: 14
-
-      - name: Email daily CSV
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          username: ${{ secrets.MAIL_USERNAME }}
-          password: ${{ secrets.MAIL_PASSWORD }}
-          subject: "Daily Reservations CSV - arrivals ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}"
-          body: |
-            Hello 👋  
-
-            Here are your automatically generated Reservations CSV files for this run.  
-            Arrival dates in this file range from ${{ steps.arrival_range.outputs.start }} to ${{ steps.arrival_range.outputs.end }}.
-
-            Note: ExternalID/profile state was set to "commit_state=${{ github.event.inputs.commit_state }}".
-
-            You can also download the CSV from “Artifacts” on the workflow run page.
-
-            — Your Automated Booking Engine 🤖
-          to: yourname@gmail.com          # ← replace with your real email or a secret
-          from: ${{ secrets.MAIL_USERNAME }}
-          attachments: "output/*.csv"
