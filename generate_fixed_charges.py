@@ -7,10 +7,11 @@ Workflow:
 - Reads transaction prices from ./config/transaction_prices.csv
 - Extracts:
     - ExternalId from arrivals file
-    - AccountId (BNC-...) from departures file
-    - FromDate = stay arrival date (ISO yyyy-mm-dd)
-    - ToDate   = stay departure date (ISO yyyy-mm-dd)
-- Builds fixed charges CSV ready for migration (max 499 rows).
+    - AccountId (BNC-...) + stay dates from departures file
+    - PostingDate = random date between stay arrival & departure (inclusive)
+- Writes a fixed charges CSV (max 499 rows) where:
+    - FromDate = PostingDate (YYYY-MM-DD)
+    - ToDate   = PostingDate (YYYY-MM-DD)
 
 Usage (from repo root, with Python 3 installed):
 
@@ -29,7 +30,7 @@ import argparse
 import os
 import random
 import re
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 import pandas as pd
 
@@ -65,7 +66,7 @@ def parse_args() -> argparse.Namespace:
 
 
 # ----------------------------
-# HELPER FUNCTIONS
+# DATE HELPERS
 # ----------------------------
 
 def _to_iso_date(s: str) -> str:
@@ -80,6 +81,7 @@ def _to_iso_date(s: str) -> str:
     if not s:
         return ""
 
+    # Try to find a date-like chunk inside the string
     patterns = [
         r"\d{2}/\d{2}/\d{4}",
         r"\d{2}-\d{2}-\d{4}",
@@ -96,6 +98,7 @@ def _to_iso_date(s: str) -> str:
             date_str = m.group(0)
             break
 
+    # If we didn't find a substring, maybe the whole string *is* the date
     if date_str is None:
         date_str = s
 
@@ -112,17 +115,52 @@ def _to_iso_date(s: str) -> str:
     for fmt in formats:
         try:
             dt = datetime.strptime(date_str, fmt).date()
-            return dt.isoformat()
+            return dt.isoformat()  # always yyyy-mm-dd
         except ValueError:
             continue
 
     return ""
 
 
+def _parse_to_date(s: str):
+    """Return a datetime.date parsed from s, or None if not parsable."""
+    iso = _to_iso_date(s)
+    if not iso:
+        return None
+    return datetime.strptime(iso, "%Y-%m-%d").date()
+
+
 def _looks_like_date(s: str) -> bool:
     """Use _to_iso_date to decide if this looks like a date."""
     return _to_iso_date(s) != ""
 
+
+def _choose_stay_date(arrival_text: str, departure_text: str) -> str:
+    """
+    Choose a random date between arrival and departure (inclusive).
+    Fallbacks:
+    - If only arrival is valid -> use arrival
+    - If only departure is valid -> use departure
+    - If neither -> return empty string
+    """
+    arr = _parse_to_date(arrival_text)
+    dep = _parse_to_date(departure_text)
+
+    if arr and dep and dep >= arr:
+        delta = (dep - arr).days
+        offset = random.randint(0, delta)
+        return (arr + timedelta(days=offset)).isoformat()
+
+    if arr:
+        return arr.isoformat()
+    if dep:
+        return dep.isoformat()
+    return ""
+
+
+# ----------------------------
+# OTHER HELPERS
+# ----------------------------
 
 def _is_digits(s: str) -> bool:
     """True if string is only digits (e.g. 27919, 28010)."""
@@ -173,8 +211,10 @@ def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
     From the arrivals report, extract:
     - ExternalId: numeric "Name" rows where the Arrival column looks like a date
       (these match the Conf. # / Ident. # in departures)
-    - header_arrival: the arrival date from the guest header line in that block
-    - header_departure: the departure date from the guest header line in that block
+
+    The arrivals export is multi-line per reservation; we:
+    - Assign a group_id that increments whenever "Room Number" is non-null.
+    - For each group, we then search for the numeric line(s) that contain the ExternalId.
     """
     df = arrivals_df.copy()
 
@@ -183,37 +223,19 @@ def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Arrivals file must contain columns: {required_cols}. Missing: {missing}")
 
-    if "Departure" not in df.columns:
-        raise ValueError("Arrivals file must contain a 'Departure' column for stay end date.")
-
     # Build group_id by "Room Number" header rows
     group_ids = []
     current_group = -1
     for rn in df["Room Number"]:
+        # New group when Room Number is not NaN and not empty
         if not (isinstance(rn, float) and pd.isna(rn)) and str(rn).strip() != "":
             current_group += 1
         group_ids.append(current_group)
     df["group_id"] = group_ids
 
-    # For each group, store the header arrival & departure (guest row)
-    header_arrival = {}
-    header_departure = {}
-    for gid, grp in df.groupby("group_id"):
-        if gid < 0:
-            continue
-        guest_rows = grp[grp["Room Number"].notna()]
-        if guest_rows.empty:
-            continue
-        header_row = guest_rows.iloc[0]
-        header_arrival[gid] = header_row["Arrival"]
-        header_departure[gid] = header_row["Departure"]
-
-    df["header_arrival"] = df["group_id"].map(header_arrival)
-    df["header_departure"] = df["group_id"].map(header_departure)
-
     # ExternalId candidates: Name is digits AND Arrival looks like a date
     mask = df["Name"].apply(_is_digits) & df["Arrival"].apply(_looks_like_date)
-    arr_ids = df.loc[mask, ["group_id", "Name", "header_arrival", "header_departure"]].copy()
+    arr_ids = df.loc[mask, ["group_id", "Name"]].copy()
     arr_ids.rename(columns={"Name": "ExternalId"}, inplace=True)
 
     return arr_ids
@@ -226,6 +248,11 @@ def build_fixed_charges(
 ) -> pd.DataFrame:
     """
     Core logic: join arrivals + departures, build fixed charges table (max 499 rows).
+
+    For each matched reservation:
+    - Choose a random PostingDate between stay arrival & departure
+    - FromDate = PostingDate
+    - ToDate = PostingDate
     """
 
     if not transaction_prices:
@@ -233,14 +260,18 @@ def build_fixed_charges(
 
     transaction_codes = list(transaction_prices.keys())
 
-    # 1) ExternalId + arrival & departure dates from arrivals
+    # 1) ExternalId from arrivals
     arr_ids = extract_arrival_external_ids(arrivals_df)
 
-    # 2) AccountId from departures
+    # 2) AccountId + stay dates from departures
     dep = departures_df.copy()
 
-    if "Conf. # / Ident. #" not in dep.columns or "Acc. #" not in dep.columns:
-        raise ValueError("Departures file must contain columns: 'Conf. # / Ident. #', 'Acc. #'")
+    required_dep_cols = {"Conf. # / Ident. #", "Acc. #", "Arr. Date & Time", "Dep. Date & Time"}
+    missing_dep = required_dep_cols.difference(dep.columns)
+    if missing_dep:
+        raise ValueError(
+            f"Departures file must contain columns: {required_dep_cols}. Missing: {missing_dep}"
+        )
 
     dep = dep.rename(
         columns={
@@ -249,7 +280,7 @@ def build_fixed_charges(
         }
     )
 
-    dep_small = dep[["ConfIdent", "AccountId"]].copy()
+    dep_small = dep[["ConfIdent", "AccountId", "Arr. Date & Time", "Dep. Date & Time"]].copy()
 
     # 3) Join arrivals & departures on ExternalId <-> ConfIdent
     merged = arr_ids.merge(
@@ -274,8 +305,7 @@ def build_fixed_charges(
         tx_code = random.choice(transaction_codes)
         unit_price = transaction_prices[tx_code]
 
-        from_date = _to_iso_date(row["header_arrival"])
-        to_date = _to_iso_date(row["header_departure"])
+        posting_date = _choose_stay_date(row["Arr. Date & Time"], row["Dep. Date & Time"])
 
         rec = {
             "ExternalSystemCode": "PMS",
@@ -286,8 +316,8 @@ def build_fixed_charges(
             "UnitPrice": unit_price,
             "Comment": "Migration",
             "ScheduleType": "Once",
-            "FromDate": from_date,
-            "ToDate": to_date,
+            "FromDate": posting_date,
+            "ToDate": posting_date,
             "CustomPostingDates": "",
             "DayOfMonth": "",
             "MonthsBetweenPostings": "",
