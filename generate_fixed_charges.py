@@ -8,16 +8,24 @@ Workflow:
 
 From ARRIVALS:
     * ConfIdent  = numeric "Name" row where Arrival looks like a date
+                   (short ID like 28726)
     * ExternalId = numeric "Name" row nearby where Arrival is HOLD / PRE / OFF
+                   (long ID like 5006885)
 
 From DEPARTURES:
     * AccountId (BNC-...)
     * Arr. Date & Time, Dep. Date & Time (stay dates)
 
 For each matched reservation (max 499):
-    * Choose a random PostingDate between arrival & departure (inclusive)
+    * Choose a PostingDate such that:
+        - PostingDate is between arrival and departure (inclusive of arrival,
+          exclusive of departure)
+        - PostingDate is NOT in the past vs today's date (business date)
     * FromDate = PostingDate  (YYYY-MM-DD)
     * ToDate   = PostingDate
+
+If no valid posting date exists for a reservation (e.g. stay fully in the past),
+that reservation is skipped.
 
 Writes: output_files/fixed_charges_output.csv
 """
@@ -26,7 +34,7 @@ import argparse
 import os
 import random
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 
 import pandas as pd
 
@@ -130,27 +138,33 @@ def _looks_like_date(s: str) -> bool:
     return _to_iso_date(s) != ""
 
 
-def _choose_stay_date(arrival_text: str, departure_text: str) -> str:
+def _choose_posting_date(arrival_text: str, departure_text: str, business_date: date) -> str:
     """
-    Choose a random date between arrival and departure (inclusive).
-    Fallbacks:
-    - If only arrival is valid -> use arrival
-    - If only departure is valid -> use departure
-    - If neither -> return empty string
+    Choose a posting date that:
+    - Is on or after both arrival_date and business_date
+    - Is strictly before departure_date (cannot be checkout day)
+
+    If no such date exists, return ''.
     """
     arr = _parse_to_date(arrival_text)
     dep = _parse_to_date(departure_text)
 
-    if arr and dep and dep >= arr:
-        delta = (dep - arr).days
-        offset = random.randint(0, delta)
-        return (arr + timedelta(days=offset)).isoformat()
+    if not arr or not dep:
+        return ""
 
-    if arr:
-        return arr.isoformat()
-    if dep:
-        return dep.isoformat()
-    return ""
+    # Latest valid day is day before departure (can't be checkout)
+    latest = dep - timedelta(days=1)
+    # Earliest valid is max(arrival, business_date)
+    earliest = max(arr, business_date)
+
+    if earliest > latest:
+        # No valid date range (stay in the past, or dep == arr, etc.)
+        return ""
+
+    delta_days = (latest - earliest).days
+    offset = random.randint(0, delta_days)
+    posting = earliest + timedelta(days=offset)
+    return posting.isoformat()
 
 
 # ----------------------------
@@ -210,8 +224,7 @@ def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataF
     - ExternalId: numeric row nearby where Arrival is HOLD / PRE / OFF
                   (long external ID, e.g. 5006885)
 
-    We don't use 'Room Number' anymore; instead we match by proximity
-    in the file (within +/- `window` rows).
+    We match by proximity in the file (within +/- `window` rows).
     """
 
     df = arrivals_df.copy()
@@ -273,7 +286,7 @@ def build_fixed_charges(
     For each matched reservation:
     - ExternalId: long ID (500xxxx) from arrivals
     - AccountId: BNC-... from departures
-    - PostingDate: random date between Arr. Date & Time and Dep. Date & Time
+    - PostingDate: random valid posting date respecting business date and not checkout
     - FromDate = PostingDate
     - ToDate   = PostingDate
     """
@@ -282,6 +295,9 @@ def build_fixed_charges(
         raise ValueError("transaction_prices dictionary is empty.")
 
     transaction_codes = list(transaction_prices.keys())
+
+    # Business date = today's date
+    business_date = date.today()
 
     # 1) ConfIdent + ExternalId from arrivals
     arr_ids = extract_arrival_ids(arrivals_df)
@@ -323,20 +339,25 @@ def build_fixed_charges(
 
     # 4) Build fixed charges rows (respect MAX_RECORDS)
     records = []
-    for idx, (_, row) in enumerate(merged.iterrows()):
-        if idx >= MAX_RECORDS:
+    for _, row in merged.iterrows():
+        if len(records) >= MAX_RECORDS:
             break
 
         external_id = str(row["ExternalId"])
         account_id = str(row["AccountId"])
 
-        tx_code = random.choice(transaction_codes)
-        unit_price = transaction_prices[tx_code]
-
-        posting_date = _choose_stay_date(
+        posting_date = _choose_posting_date(
             row["Arr. Date & Time"],
             row["Dep. Date & Time"],
+            business_date=business_date,
         )
+
+        if not posting_date:
+            # No valid posting date -> skip this reservation
+            continue
+
+        tx_code = random.choice(transaction_codes)
+        unit_price = transaction_prices[tx_code]
 
         rec = {
             "ExternalSystemCode": "PMS",
