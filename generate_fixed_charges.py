@@ -10,7 +10,7 @@ Workflow:
     - AccountId (BNC-...) from departures file
     - FromDate = stay arrival date (ISO yyyy-mm-dd)
     - ToDate   = stay departure date (ISO yyyy-mm-dd)
-- Builds fixed charges CSV ready for migration.
+- Builds fixed charges CSV ready for migration (max 499 rows).
 
 Usage (from repo root, with Python 3 installed):
 
@@ -32,6 +32,9 @@ import re
 from datetime import datetime
 
 import pandas as pd
+
+# Maximum number of records in the generated CSV
+MAX_RECORDS = 499
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,9 +72,6 @@ def _to_iso_date(s: str) -> str:
     """
     Try to parse a date from the input string in several common formats
     and return it as ISO yyyy-mm-dd. Returns '' if parsing fails.
-
-    This makes the output independent of how the date is formatted
-    in the CSV (25/12/2025, 25-12-2025, 25-Dec-25, 2025-12-25, etc.).
     """
     if not isinstance(s, str):
         s = str(s)
@@ -80,7 +80,6 @@ def _to_iso_date(s: str) -> str:
     if not s:
         return ""
 
-    # Try to find a date-like chunk inside the string
     patterns = [
         r"\d{2}/\d{2}/\d{4}",
         r"\d{2}-\d{2}-\d{4}",
@@ -97,11 +96,9 @@ def _to_iso_date(s: str) -> str:
             date_str = m.group(0)
             break
 
-    # If we didn't find a substring, maybe the whole string *is* the date
     if date_str is None:
         date_str = s
 
-    # Try multiple formats
     formats = [
         "%d/%m/%Y",
         "%d-%m-%Y",
@@ -115,11 +112,10 @@ def _to_iso_date(s: str) -> str:
     for fmt in formats:
         try:
             dt = datetime.strptime(date_str, fmt).date()
-            return dt.isoformat()  # always yyyy-mm-dd
+            return dt.isoformat()
         except ValueError:
             continue
 
-    # If everything fails, return empty string so it's obvious something's wrong
     return ""
 
 
@@ -179,12 +175,6 @@ def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
       (these match the Conf. # / Ident. # in departures)
     - header_arrival: the arrival date from the guest header line in that block
     - header_departure: the departure date from the guest header line in that block
-
-    The arrivals export is multi-line per reservation; we:
-    - Assign a group_id that increments whenever "Room Number" is non-null.
-    - For each group, the first row with a Room Number is the guest header.
-    - Within that group, we pick the row where:
-        Name is digits (e.g. '27919') AND Arrival looks like a date.
     """
     df = arrivals_df.copy()
 
@@ -193,16 +183,13 @@ def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError(f"Arrivals file must contain columns: {required_cols}. Missing: {missing}")
 
-    # We'll try to use 'Departure' for stay end date.
     if "Departure" not in df.columns:
-        # If your file uses a slightly different name, adjust here.
         raise ValueError("Arrivals file must contain a 'Departure' column for stay end date.")
 
     # Build group_id by "Room Number" header rows
     group_ids = []
     current_group = -1
     for rn in df["Room Number"]:
-        # New group when Room Number is not NaN and not empty
         if not (isinstance(rn, float) and pd.isna(rn)) and str(rn).strip() != "":
             current_group += 1
         group_ids.append(current_group)
@@ -238,20 +225,7 @@ def build_fixed_charges(
     transaction_prices: dict,
 ) -> pd.DataFrame:
     """
-    Core logic: join arrivals + departures, build fixed charges table.
-
-    Requirements:
-    - ExternalSystemCode: always "PMS"
-    - ExternalId: from arrivals (numeric row)
-    - AccountId: from departures (Acc. #, must start with BNC)
-    - TransactionCode: random from transaction_prices keys
-    - Quantity: always 1
-    - UnitPrice: from transaction_prices
-    - Comment: "Migration"
-    - ScheduleType: "Once"
-    - FromDate: stay arrival date (ISO yyyy-mm-dd)
-    - ToDate:   stay departure date (ISO yyyy-mm-dd)
-    - Other schedule fields: blank
+    Core logic: join arrivals + departures, build fixed charges table (max 499 rows).
     """
 
     if not transaction_prices:
@@ -288,9 +262,12 @@ def build_fixed_charges(
     # Keep only BNC accounts
     merged = merged[merged["AccountId"].astype(str).str.startswith("BNC")].copy()
 
-    # 4) Build fixed charges rows
+    # 4) Build fixed charges rows (respect MAX_RECORDS)
     records = []
-    for _, row in merged.iterrows():
+    for idx, (_, row) in enumerate(merged.iterrows()):
+        if idx >= MAX_RECORDS:
+            break
+
         external_id = str(row["ExternalId"])
         account_id = str(row["AccountId"])
 
