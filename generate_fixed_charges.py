@@ -4,6 +4,7 @@ Generate Fixed Charges CSV from arrivals + departures reports.
 
 Workflow:
 - Reads arrivals.csv and departures.csv from ./input_files
+- Reads transaction prices from ./config/transaction_prices.csv
 - Extracts:
     - ExternalId from arrivals file
     - AccountId (BNC-...) from departures file
@@ -19,6 +20,7 @@ Optional arguments:
     python generate_fixed_charges.py \
         --arrivals input_files/arrivals.csv \
         --departures input_files/departures.csv \
+        --txfile config/transaction_prices.csv \
         --output output_files/fixed_charges_output.csv
 """
 
@@ -29,18 +31,6 @@ import re
 from datetime import datetime
 
 import pandas as pd
-
-# --------------------------------------------------------------------
-# CONFIG – UPDATE THIS MAPPING WITH YOUR REAL TRANSACTION CODES/PRICES
-# --------------------------------------------------------------------
-# Example only. Replace with your real list:
-#   e.g. {"20-12": 50.0, "30-01": 75.0, ...}
-TRANSACTION_PRICES = {
-    "20-12": 50.0,
-    "30-01": 75.0,
-    "40-99": 100.0,
-}
-TRANSACTION_CODES = list(TRANSACTION_PRICES.keys())
 
 
 def parse_args() -> argparse.Namespace:
@@ -56,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         "--departures",
         default=os.path.join("input_files", "departures.csv"),
         help="Path to departures CSV (export from PMS). Default: input_files/departures.csv",
+    )
+    parser.add_argument(
+        "--txfile",
+        default=os.path.join("config", "transaction_prices.csv"),
+        help="Path to transaction prices CSV. Default: config/transaction_prices.csv",
     )
     parser.add_argument(
         "--output",
@@ -97,6 +92,44 @@ def _to_iso_date(s: str) -> str:
     return dt.isoformat()
 
 
+def load_transaction_prices(path: str) -> dict:
+    """
+    Load transaction prices from CSV.
+
+    Expected columns:
+    - TransactionCode
+    - UnitPrice
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Transaction prices file not found: {path}")
+
+    df = pd.read_csv(path)
+
+    expected_cols = {"TransactionCode", "UnitPrice"}
+    if not expected_cols.issubset(df.columns):
+        raise ValueError(
+            f"Transaction prices file must contain columns: {expected_cols}. "
+            f"Found: {list(df.columns)}"
+        )
+
+    # Convert to dict: { "20-01": 32.0, ... }
+    prices = {}
+    for _, row in df.iterrows():
+        code = str(row["TransactionCode"]).strip()
+        if code == "":
+            continue
+        try:
+            price = float(row["UnitPrice"])
+        except Exception:
+            continue
+        prices[code] = price
+
+    if not prices:
+        raise ValueError("No valid transaction prices loaded from file.")
+
+    return prices
+
+
 def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
     """
     From the arrivals report, extract:
@@ -130,7 +163,6 @@ def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
     for gid, grp in df.groupby("group_id"):
         if gid < 0:
             continue
-        # First row with Room Number in this group is the guest header
         guest_rows = grp[grp["Room Number"].notna()]
         if guest_rows.empty:
             continue
@@ -150,6 +182,7 @@ def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
 def build_fixed_charges(
     arrivals_df: pd.DataFrame,
     departures_df: pd.DataFrame,
+    transaction_prices: dict,
 ) -> pd.DataFrame:
     """
     Core logic: join arrivals + departures, build fixed charges table.
@@ -158,14 +191,19 @@ def build_fixed_charges(
     - ExternalSystemCode: always "PMS"
     - ExternalId: from arrivals (numeric row)
     - AccountId: from departures (Acc. #, must start with BNC)
-    - TransactionCode: random from TRANSACTION_PRICES keys
+    - TransactionCode: random from transaction_prices keys
     - Quantity: always 1
-    - UnitPrice: from TRANSACTION_PRICES
+    - UnitPrice: from transaction_prices
     - Comment: "Migration"
     - ScheduleType: "Once"
     - FromDate: arrival date (ISO yyyy-mm-dd, mirroring the arrival date)
     - Other schedule fields: blank
     """
+
+    if not transaction_prices:
+        raise ValueError("transaction_prices dictionary is empty.")
+
+    transaction_codes = list(transaction_prices.keys())
 
     # 1) ExternalId + arrival date from arrivals
     arr_ids = extract_arrival_external_ids(arrivals_df)
@@ -173,7 +211,6 @@ def build_fixed_charges(
     # 2) AccountId from departures
     dep = departures_df.copy()
 
-    # Normalise expected columns
     if "Conf. # / Ident. #" not in dep.columns or "Acc. #" not in dep.columns:
         raise ValueError("Departures file must contain columns: 'Conf. # / Ident. #', 'Acc. #'")
 
@@ -203,12 +240,9 @@ def build_fixed_charges(
         external_id = str(row["ExternalId"])
         account_id = str(row["AccountId"])
 
-        if not TRANSACTION_CODES:
-            raise ValueError("TRANSACTION_PRICES is empty. Please configure transaction codes and prices.")
-
         # random transaction code from configured list
-        tx_code = random.choice(TRANSACTION_CODES)
-        unit_price = TRANSACTION_PRICES[tx_code]
+        tx_code = random.choice(transaction_codes)
+        unit_price = transaction_prices[tx_code]
 
         from_date = _to_iso_date(row["header_arrival"])
 
@@ -252,9 +286,7 @@ def build_fixed_charges(
         ],
     )
 
-    # Make sure blanks are empty strings, not NaN
     fixed_df = fixed_df.fillna("")
-
     return fixed_df
 
 
@@ -275,7 +307,10 @@ def main():
     arrivals = pd.read_csv(args.arrivals)
     departures = pd.read_csv(args.departures)
 
-    fixed_df = build_fixed_charges(arrivals, departures)
+    # Load transaction prices
+    transaction_prices = load_transaction_prices(args.txfile)
+
+    fixed_df = build_fixed_charges(arrivals, departures, transaction_prices)
 
     # Write output
     fixed_df.to_csv(args.output, index=False)
