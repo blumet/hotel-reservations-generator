@@ -5,16 +5,21 @@ Generate Fixed Charges CSV from arrivals + departures reports.
 Workflow:
 - Reads arrivals.csv and departures.csv from ./input_files
 - Reads transaction prices from ./config/transaction_prices.csv
-- From ARRIVALS:
-    * ConfIdent  = numeric line where Arrival looks like a date
-    * ExternalId = numeric line where Arrival is HOLD / PRE / OFF
-- From DEPARTURES:
+
+From ARRIVALS:
+    * ConfIdent  = numeric "Name" row where Arrival looks like a date
+    * ExternalId = numeric "Name" row nearby where Arrival is HOLD / PRE / OFF
+
+From DEPARTURES:
     * AccountId (BNC-...)
     * Arr. Date & Time, Dep. Date & Time (stay dates)
-- For each matched reservation (max 499):
+
+For each matched reservation (max 499):
     * Choose a random PostingDate between arrival & departure (inclusive)
     * FromDate = PostingDate  (YYYY-MM-DD)
     * ToDate   = PostingDate
+
+Writes: output_files/fixed_charges_output.csv
 """
 
 import argparse
@@ -67,7 +72,6 @@ def _to_iso_date(s: str) -> str:
     """
     if not isinstance(s, str):
         s = str(s)
-
     s = s.strip()
     if not s:
         return ""
@@ -76,10 +80,10 @@ def _to_iso_date(s: str) -> str:
     patterns = [
         r"\d{2}/\d{2}/\d{4}",
         r"\d{2}-\d{2}-\d{4}",
+        r"\d{4}-\d{2}-\d{2}",
         r"\d{2}/\d{2}/\d{2}",
         r"\d{2}-\d{2}-\d{2}",
         r"\d{2}-[A-Za-z]{3}-\d{2,4}",
-        r"\d{4}-\d{2}-\d{2}",
     ]
 
     date_str = None
@@ -96,11 +100,11 @@ def _to_iso_date(s: str) -> str:
     formats = [
         "%d/%m/%Y",
         "%d-%m-%Y",
+        "%Y-%m-%d",
         "%d/%m/%y",
         "%d-%m-%y",
         "%d-%b-%Y",
         "%d-%b-%y",
-        "%Y-%m-%d",
     ]
 
     for fmt in formats:
@@ -197,61 +201,65 @@ def load_transaction_prices(path: str) -> dict:
     return prices
 
 
-def extract_arrival_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
+def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
     """
-    From the arrivals report, extract for each reservation group:
+    From the arrivals report, extract for each reservation:
 
-    - ConfIdent: numeric Name where Arrival looks like a date
-                 (this matches 'Conf. # / Ident. #' in departures)
-    - ExternalId: numeric Name where Arrival is HOLD / PRE / OFF
-                  (this is the long external ID like 5006885)
+    - ConfIdent: numeric row where Arrival looks like a date
+                 (matches 'Conf. # / Ident. #' in departures)
+    - ExternalId: numeric row nearby where Arrival is HOLD / PRE / OFF
+                  (long external ID, e.g. 5006885)
 
-    Returns DataFrame with columns: ConfIdent, ExternalId
+    We don't use 'Room Number' anymore; instead we match by proximity
+    in the file (within +/- `window` rows).
     """
 
     df = arrivals_df.copy()
 
-    required_cols = {"Room Number", "Name", "Arrival"}
+    required_cols = {"Name", "Arrival"}
     missing = required_cols.difference(df.columns)
     if missing:
         raise ValueError(f"Arrivals file must contain columns: {required_cols}. Missing: {missing}")
 
-    # Build group_id by "Room Number" header rows
-    group_ids = []
-    current_group = -1
-    for rn in df["Room Number"]:
-        if not (isinstance(rn, float) and pd.isna(rn)) and str(rn).strip() != "":
-            current_group += 1
-        group_ids.append(current_group)
-    df["group_id"] = group_ids
+    df["idx"] = df.index
 
-    rows = []
-    for gid, grp in df.groupby("group_id"):
-        if gid < 0:
+    # Numeric rows
+    numeric = df[df["Name"].astype(str).apply(_is_digits)]
+
+    # ConfIdent candidates: numeric + Arrival looks like a date
+    conf_rows = numeric[numeric["Arrival"].apply(_looks_like_date)]
+
+    # ExternalId candidates: numeric + Arrival in HOLD/PRE/OFF
+    ext_rows = numeric[numeric["Arrival"].isin(["HOLD", "PRE", "OFF"])]
+
+    if conf_rows.empty or ext_rows.empty:
+        raise ValueError("Could not find enough numeric ConfIdent/ExternalId rows in arrivals file.")
+
+    pairs = []
+    for _, ext in ext_rows.iterrows():
+        idx = ext["idx"]
+        # Look for nearby conf rows
+        nearby = conf_rows[
+            (conf_rows["idx"] >= idx - window) &
+            (conf_rows["idx"] <= idx + window)
+        ]
+        if nearby.empty:
             continue
+        # Take the closest by index
+        nearest = nearby.iloc[(nearby["idx"] - idx).abs().argsort().iloc[0]]
+        conf_id = str(nearest["Name"]).strip()
+        ext_id = str(ext["Name"]).strip()
+        pairs.append((conf_id, ext_id))
 
-        # Numeric NAME rows in this group
-        numeric = grp[grp["Name"].astype(str).apply(_is_digits)]
+    if not pairs:
+        raise ValueError("No ConfIdent/ExternalId pairs could be matched in arrivals file.")
 
-        if numeric.empty:
-            continue
+    pair_df = pd.DataFrame(pairs, columns=["ConfIdent", "ExternalId"])
 
-        conf_rows = numeric[numeric["Arrival"].apply(_looks_like_date)]
-        ext_rows = numeric[numeric["Arrival"].isin(["HOLD", "PRE", "OFF"])]
+    # Deduplicate by ConfIdent (one ExternalId per reservation)
+    pair_df = pair_df.drop_duplicates(subset=["ConfIdent"])
 
-        if conf_rows.empty or ext_rows.empty:
-            # If we don't find both, skip this reservation
-            continue
-
-        conf_id = str(conf_rows["Name"].iloc[0]).strip()
-        ext_id = str(ext_rows["Name"].iloc[0]).strip()
-
-        rows.append({"ConfIdent": conf_id, "ExternalId": ext_id})
-
-    if not rows:
-        raise ValueError("No ConfIdent/ExternalId pairs could be extracted from arrivals file.")
-
-    return pd.DataFrame(rows)
+    return pair_df
 
 
 def build_fixed_charges(
@@ -305,9 +313,9 @@ def build_fixed_charges(
     ].copy()
     dep_small["ConfIdent"] = dep_small["ConfIdent"].astype(str).str.strip()
 
-    # 3) Join on ConfIdent (short code)
     arr_ids["ConfIdent"] = arr_ids["ConfIdent"].astype(str).str.strip()
 
+    # 3) Join on ConfIdent (short code)
     merged = arr_ids.merge(dep_small, on="ConfIdent", how="inner")
 
     # Keep only BNC accounts
