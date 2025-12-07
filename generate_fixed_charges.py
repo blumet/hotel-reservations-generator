@@ -5,32 +5,23 @@ Generate Fixed Charges CSV from arrivals + departures reports.
 Workflow:
 - Reads arrivals.csv and departures.csv from ./input_files
 - Reads transaction prices from ./config/transaction_prices.csv
-- Extracts:
-    - ExternalId from arrivals file
-    - AccountId (BNC-...) + stay dates from departures file
-    - PostingDate = random date between stay arrival & departure (inclusive)
-- Writes a fixed charges CSV (max 499 rows) where:
-    - FromDate = PostingDate (YYYY-MM-DD)
-    - ToDate   = PostingDate (YYYY-MM-DD)
-
-Usage (from repo root, with Python 3 installed):
-
-    python generate_fixed_charges.py
-
-Optional arguments:
-
-    python generate_fixed_charges.py \
-        --arrivals input_files/arrivals.csv \
-        --departures input_files/departures.csv \
-        --txfile config/transaction_prices.csv \
-        --output output_files/fixed_charges_output.csv
+- From ARRIVALS:
+    * ConfIdent  = numeric line where Arrival looks like a date
+    * ExternalId = numeric line where Arrival is HOLD / PRE / OFF
+- From DEPARTURES:
+    * AccountId (BNC-...)
+    * Arr. Date & Time, Dep. Date & Time (stay dates)
+- For each matched reservation (max 499):
+    * Choose a random PostingDate between arrival & departure (inclusive)
+    * FromDate = PostingDate  (YYYY-MM-DD)
+    * ToDate   = PostingDate
 """
 
 import argparse
 import os
 import random
 import re
-from datetime import datetime, date, timedelta
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -163,9 +154,9 @@ def _choose_stay_date(arrival_text: str, departure_text: str) -> str:
 # ----------------------------
 
 def _is_digits(s: str) -> bool:
-    """True if string is only digits (e.g. 27919, 28010)."""
+    """True if string is only digits (e.g. 27919, 28010, 5006885)."""
     if not isinstance(s, str):
-        return False
+        s = str(s)
     return s.strip().isdigit()
 
 
@@ -206,16 +197,18 @@ def load_transaction_prices(path: str) -> dict:
     return prices
 
 
-def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
+def extract_arrival_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
     """
-    From the arrivals report, extract:
-    - ExternalId: numeric "Name" rows where the Arrival column looks like a date
-      (these match the Conf. # / Ident. # in departures)
+    From the arrivals report, extract for each reservation group:
 
-    The arrivals export is multi-line per reservation; we:
-    - Assign a group_id that increments whenever "Room Number" is non-null.
-    - For each group, we then search for the numeric line(s) that contain the ExternalId.
+    - ConfIdent: numeric Name where Arrival looks like a date
+                 (this matches 'Conf. # / Ident. #' in departures)
+    - ExternalId: numeric Name where Arrival is HOLD / PRE / OFF
+                  (this is the long external ID like 5006885)
+
+    Returns DataFrame with columns: ConfIdent, ExternalId
     """
+
     df = arrivals_df.copy()
 
     required_cols = {"Room Number", "Name", "Arrival"}
@@ -227,18 +220,38 @@ def extract_arrival_external_ids(arrivals_df: pd.DataFrame) -> pd.DataFrame:
     group_ids = []
     current_group = -1
     for rn in df["Room Number"]:
-        # New group when Room Number is not NaN and not empty
         if not (isinstance(rn, float) and pd.isna(rn)) and str(rn).strip() != "":
             current_group += 1
         group_ids.append(current_group)
     df["group_id"] = group_ids
 
-    # ExternalId candidates: Name is digits AND Arrival looks like a date
-    mask = df["Name"].apply(_is_digits) & df["Arrival"].apply(_looks_like_date)
-    arr_ids = df.loc[mask, ["group_id", "Name"]].copy()
-    arr_ids.rename(columns={"Name": "ExternalId"}, inplace=True)
+    rows = []
+    for gid, grp in df.groupby("group_id"):
+        if gid < 0:
+            continue
 
-    return arr_ids
+        # Numeric NAME rows in this group
+        numeric = grp[grp["Name"].astype(str).apply(_is_digits)]
+
+        if numeric.empty:
+            continue
+
+        conf_rows = numeric[numeric["Arrival"].apply(_looks_like_date)]
+        ext_rows = numeric[numeric["Arrival"].isin(["HOLD", "PRE", "OFF"])]
+
+        if conf_rows.empty or ext_rows.empty:
+            # If we don't find both, skip this reservation
+            continue
+
+        conf_id = str(conf_rows["Name"].iloc[0]).strip()
+        ext_id = str(ext_rows["Name"].iloc[0]).strip()
+
+        rows.append({"ConfIdent": conf_id, "ExternalId": ext_id})
+
+    if not rows:
+        raise ValueError("No ConfIdent/ExternalId pairs could be extracted from arrivals file.")
+
+    return pd.DataFrame(rows)
 
 
 def build_fixed_charges(
@@ -247,12 +260,14 @@ def build_fixed_charges(
     transaction_prices: dict,
 ) -> pd.DataFrame:
     """
-    Core logic: join arrivals + departures, build fixed charges table (max 499 rows).
+    Join arrivals + departures, then build fixed charges table (max 499 rows).
 
     For each matched reservation:
-    - Choose a random PostingDate between stay arrival & departure
+    - ExternalId: long ID (500xxxx) from arrivals
+    - AccountId: BNC-... from departures
+    - PostingDate: random date between Arr. Date & Time and Dep. Date & Time
     - FromDate = PostingDate
-    - ToDate = PostingDate
+    - ToDate   = PostingDate
     """
 
     if not transaction_prices:
@@ -260,13 +275,18 @@ def build_fixed_charges(
 
     transaction_codes = list(transaction_prices.keys())
 
-    # 1) ExternalId from arrivals
-    arr_ids = extract_arrival_external_ids(arrivals_df)
+    # 1) ConfIdent + ExternalId from arrivals
+    arr_ids = extract_arrival_ids(arrivals_df)
 
     # 2) AccountId + stay dates from departures
     dep = departures_df.copy()
 
-    required_dep_cols = {"Conf. # / Ident. #", "Acc. #", "Arr. Date & Time", "Dep. Date & Time"}
+    required_dep_cols = {
+        "Conf. # / Ident. #",
+        "Acc. #",
+        "Arr. Date & Time",
+        "Dep. Date & Time",
+    }
     missing_dep = required_dep_cols.difference(dep.columns)
     if missing_dep:
         raise ValueError(
@@ -280,15 +300,15 @@ def build_fixed_charges(
         }
     )
 
-    dep_small = dep[["ConfIdent", "AccountId", "Arr. Date & Time", "Dep. Date & Time"]].copy()
+    dep_small = dep[
+        ["ConfIdent", "AccountId", "Arr. Date & Time", "Dep. Date & Time"]
+    ].copy()
+    dep_small["ConfIdent"] = dep_small["ConfIdent"].astype(str).str.strip()
 
-    # 3) Join arrivals & departures on ExternalId <-> ConfIdent
-    merged = arr_ids.merge(
-        dep_small,
-        left_on="ExternalId",
-        right_on="ConfIdent",
-        how="inner",
-    )
+    # 3) Join on ConfIdent (short code)
+    arr_ids["ConfIdent"] = arr_ids["ConfIdent"].astype(str).str.strip()
+
+    merged = arr_ids.merge(dep_small, on="ConfIdent", how="inner")
 
     # Keep only BNC accounts
     merged = merged[merged["AccountId"].astype(str).str.startswith("BNC")].copy()
@@ -305,7 +325,10 @@ def build_fixed_charges(
         tx_code = random.choice(transaction_codes)
         unit_price = transaction_prices[tx_code]
 
-        posting_date = _choose_stay_date(row["Arr. Date & Time"], row["Dep. Date & Time"])
+        posting_date = _choose_stay_date(
+            row["Arr. Date & Time"],
+            row["Dep. Date & Time"],
+        )
 
         rec = {
             "ExternalSystemCode": "PMS",
