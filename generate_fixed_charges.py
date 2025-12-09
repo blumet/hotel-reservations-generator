@@ -15,10 +15,11 @@ From ARRIVALS:
 From DEPARTURES:
     * AccountId (BNC-...)
     * Arr. Date & Time, Dep. Date & Time (stay dates)
+      (column names detected flexibly)
 
 For each matched reservation (max 499):
     * Choose a TransactionCode at random
-    * For that code, choose ScheduleType randomly from its allowed modes:
+    * For that code, choose ScheduleType from its allowed modes:
          - once  -> Only "Once"
          - daily -> Only "Daily"
          - both  -> Randomly "Once" or "Daily"
@@ -89,7 +90,6 @@ def _to_iso_date(s: str) -> str:
     if not s:
         return ""
 
-    # Try to find a date-like chunk inside the string
     patterns = [
         r"\d{2}/\d{2}/\d{4}",
         r"\d{2}-\d{2}-\d{4}",
@@ -106,7 +106,6 @@ def _to_iso_date(s: str) -> str:
             date_str = m.group(0)
             break
 
-    # If we didn't find a substring, maybe the whole string *is* the date
     if date_str is None:
         date_str = s
 
@@ -123,7 +122,7 @@ def _to_iso_date(s: str) -> str:
     for fmt in formats:
         try:
             dt = datetime.strptime(date_str, fmt).date()
-            return dt.isoformat()  # always yyyy-mm-dd
+            return dt.isoformat()
         except ValueError:
             continue
 
@@ -189,11 +188,9 @@ def _choose_daily_period(arrival_text: str, departure_text: str, business_date: 
         return "", ""
 
     total_days = (latest - earliest).days
-    # Random start within [earliest, latest]
     start_offset = random.randint(0, total_days)
     start = earliest + timedelta(days=start_offset)
 
-    # Random end between start and latest
     remaining_days = (latest - start).days
     end_offset = random.randint(0, remaining_days) if remaining_days > 0 else 0
     end = start + timedelta(days=end_offset)
@@ -210,6 +207,20 @@ def _is_digits(s: str) -> bool:
     if not isinstance(s, str):
         s = str(s)
     return s.strip().isdigit()
+
+
+def _find_column(df: pd.DataFrame, candidates, context: str) -> str:
+    """
+    Find the first existing column in df among candidates.
+    Raise a clear error if none is found.
+    """
+    for c in candidates:
+        if c in df.columns:
+            return c
+    raise ValueError(
+        f"Departures file must contain one of columns {candidates} for {context}. "
+        f"Found columns: {list(df.columns)}"
+    )
 
 
 def load_transaction_prices(path: str):
@@ -263,7 +274,7 @@ def load_transaction_prices(path: str):
             elif raw == "once" or raw == "":
                 modes = {"once"}
             else:
-                modes = {"once"}  # unknown value -> fall back to once
+                modes = {"once"}
 
         schedule_modes[code] = modes
 
@@ -309,14 +320,12 @@ def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataF
     pairs = []
     for _, ext in ext_rows.iterrows():
         idx = ext["idx"]
-        # Look for nearby conf rows
         nearby = conf_rows[
             (conf_rows["idx"] >= idx - window) &
             (conf_rows["idx"] <= idx + window)
         ]
         if nearby.empty:
             continue
-        # Take the closest by index
         nearest = nearby.iloc[(nearby["idx"] - idx).abs().argsort().iloc[0]]
         conf_id = str(nearest["Name"]).strip()
         ext_id = str(ext["Name"]).strip()
@@ -326,10 +335,7 @@ def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataF
         raise ValueError("No ConfIdent/ExternalId pairs could be matched in arrivals file.")
 
     pair_df = pd.DataFrame(pairs, columns=["ConfIdent", "ExternalId"])
-
-    # Deduplicate by ConfIdent (one ExternalId per reservation)
     pair_df = pair_df.drop_duplicates(subset=["ConfIdent"])
-
     return pair_df
 
 
@@ -362,30 +368,39 @@ def build_fixed_charges(
     # 2) AccountId + stay dates from departures
     dep = departures_df.copy()
 
-    required_dep_cols = {
-        "Conf. # / Ident. #",
-        "Acc. #",
-        "Arr. Date & Time",
-        "Dep. Date & Time",
-    }
-    missing_dep = required_dep_cols.difference(dep.columns)
-    if missing_dep:
-        raise ValueError(
-            f"Departures file must contain columns: {required_dep_cols}. Missing: {missing_dep}"
-        )
+    # Detect columns flexibly
+    conf_col = _find_column(
+        dep,
+        ["Conf. # / Ident. #", "Conf # / Ident #", "Conf#/Ident#", "Confirmation", "Conf No", "Confirmation #"],
+        "confirmation / ConfIdent",
+    )
+    acc_col = _find_column(
+        dep,
+        ["Acc. #", "Acc #", "Account #", "Account No", "Account No.", "Account"],
+        "account id",
+    )
+    arr_col = _find_column(
+        dep,
+        ["Arr. Date & Time", "Arrival Date & Time", "Arr. Date", "Arrival Date", "Arrival"],
+        "arrival date",
+    )
+    dep_col = _find_column(
+        dep,
+        ["Dep. Date & Time", "Departure Date & Time", "Dep. Date", "Departure Date", "Departure"],
+        "departure date",
+    )
 
-    dep = dep.rename(
+    dep_small = dep[[conf_col, acc_col, arr_col, dep_col]].copy()
+    dep_small = dep_small.rename(
         columns={
-            "Conf. # / Ident. #": "ConfIdent",
-            "Acc. #": "AccountId",
+            conf_col: "ConfIdent",
+            acc_col: "AccountId",
+            arr_col: "Arr. Date & Time",
+            dep_col: "Dep. Date & Time",
         }
     )
 
-    dep_small = dep[
-        ["ConfIdent", "AccountId", "Arr. Date & Time", "Dep. Date & Time"]
-    ].copy()
     dep_small["ConfIdent"] = dep_small["ConfIdent"].astype(str).str.strip()
-
     arr_ids["ConfIdent"] = arr_ids["ConfIdent"].astype(str).str.strip()
 
     # 3) Join on ConfIdent (short code)
@@ -403,11 +418,9 @@ def build_fixed_charges(
         external_id = str(row["ExternalId"])
         account_id = str(row["AccountId"])
 
-        # Choose a transaction code
         tx_code = random.choice(transaction_codes)
         unit_price = transaction_prices[tx_code]
 
-        # Determine allowed schedule modes for this code
         allowed = schedule_modes.get(tx_code, {"once"})
         if "daily" in allowed and "once" in allowed:
             chosen_mode = random.choice(["Once", "Daily"])
@@ -425,7 +438,7 @@ def build_fixed_charges(
                 continue
             from_date = posting_date
             to_date = posting_date
-        else:  # Daily
+        else:
             from_date, to_date = _choose_daily_period(arr_text, dep_text, business_date)
             if not from_date:
                 continue
@@ -482,7 +495,6 @@ def main():
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
 
-    # Read input CSVs
     if not os.path.exists(args.arrivals):
         raise FileNotFoundError(f"Arrivals file not found: {args.arrivals}")
     if not os.path.exists(args.departures):
@@ -491,12 +503,10 @@ def main():
     arrivals = pd.read_csv(args.arrivals)
     departures = pd.read_csv(args.departures)
 
-    # Load transaction prices + schedule modes
     transaction_prices, schedule_modes = load_transaction_prices(args.txfile)
 
     fixed_df = build_fixed_charges(arrivals, departures, transaction_prices, schedule_modes)
 
-    # Write output
     fixed_df.to_csv(args.output, index=False)
     print(f"Generated fixed charges file: {args.output}")
     print(f"Rows: {len(fixed_df)}")
