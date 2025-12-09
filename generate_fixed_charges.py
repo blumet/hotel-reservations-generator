@@ -4,7 +4,7 @@ Generate Fixed Charges CSV from arrivals + departures reports.
 
 Workflow:
 - Reads arrivals.csv and departures.csv from ./input_files
-- Reads transaction prices from ./config/transaction_prices.csv
+- Reads transaction prices + allowed schedule types from ./config/transaction_prices.csv
 
 From ARRIVALS:
     * ConfIdent  = numeric "Name" row where Arrival looks like a date
@@ -17,15 +17,20 @@ From DEPARTURES:
     * Arr. Date & Time, Dep. Date & Time (stay dates)
 
 For each matched reservation (max 499):
-    * Choose a PostingDate such that:
-        - PostingDate is between arrival and departure (inclusive of arrival,
-          exclusive of departure)
-        - PostingDate is NOT in the past vs today's date (business date)
-    * FromDate = PostingDate  (YYYY-MM-DD)
-    * ToDate   = PostingDate
+    * Choose a TransactionCode at random
+    * For that code, choose ScheduleType randomly from its allowed modes:
+         - once  -> Only "Once"
+         - daily -> Only "Daily"
+         - both  -> Randomly "Once" or "Daily"
+    * Choose posting dates such that:
+         - Dates are on/after business date (today)
+         - Dates are within the stay
+         - Dates never include checkout day
 
-If no valid posting date exists for a reservation (e.g. stay fully in the past),
-that reservation is skipped.
+    * If ScheduleType == "Once":
+         FromDate = ToDate = one valid posting date
+      If ScheduleType == "Daily":
+         FromDate = range_start, ToDate = range_end
 
 Writes: output_files/fixed_charges_output.csv
 """
@@ -138,12 +143,11 @@ def _looks_like_date(s: str) -> bool:
     return _to_iso_date(s) != ""
 
 
-def _choose_posting_date(arrival_text: str, departure_text: str, business_date: date) -> str:
+def _choose_once_posting_date(arrival_text: str, departure_text: str, business_date: date) -> str:
     """
-    Choose a posting date that:
+    Choose a single posting date that:
     - Is on or after both arrival_date and business_date
     - Is strictly before departure_date (cannot be checkout day)
-
     If no such date exists, return ''.
     """
     arr = _parse_to_date(arrival_text)
@@ -152,19 +156,49 @@ def _choose_posting_date(arrival_text: str, departure_text: str, business_date: 
     if not arr or not dep:
         return ""
 
-    # Latest valid day is day before departure (can't be checkout)
-    latest = dep - timedelta(days=1)
-    # Earliest valid is max(arrival, business_date)
+    latest = dep - timedelta(days=1)  # can't be checkout
     earliest = max(arr, business_date)
 
     if earliest > latest:
-        # No valid date range (stay in the past, or dep == arr, etc.)
         return ""
 
     delta_days = (latest - earliest).days
     offset = random.randint(0, delta_days)
     posting = earliest + timedelta(days=offset)
     return posting.isoformat()
+
+
+def _choose_daily_period(arrival_text: str, departure_text: str, business_date: date):
+    """
+    Choose a date range [start, end] for a Daily schedule:
+    - start >= max(arrival_date, business_date)
+    - end <= departure_date - 1 day (not checkout)
+    - start <= end
+    Returns (start_iso, end_iso) or ('', '') if impossible.
+    """
+    arr = _parse_to_date(arrival_text)
+    dep = _parse_to_date(departure_text)
+
+    if not arr or not dep:
+        return "", ""
+
+    latest = dep - timedelta(days=1)
+    earliest = max(arr, business_date)
+
+    if earliest > latest:
+        return "", ""
+
+    total_days = (latest - earliest).days
+    # Random start within [earliest, latest]
+    start_offset = random.randint(0, total_days)
+    start = earliest + timedelta(days=start_offset)
+
+    # Random end between start and latest
+    remaining_days = (latest - start).days
+    end_offset = random.randint(0, remaining_days) if remaining_days > 0 else 0
+    end = start + timedelta(days=end_offset)
+
+    return start.isoformat(), end.isoformat()
 
 
 # ----------------------------
@@ -178,13 +212,19 @@ def _is_digits(s: str) -> bool:
     return s.strip().isdigit()
 
 
-def load_transaction_prices(path: str) -> dict:
+def load_transaction_prices(path: str):
     """
-    Load transaction prices from CSV.
+    Load transaction prices and allowed schedule modes from CSV.
 
     Expected columns:
     - TransactionCode
     - UnitPrice
+    Optional:
+    - ScheduleType: 'once', 'daily', 'both'
+
+    Returns:
+      prices: dict[code] -> float
+      schedule_modes: dict[code] -> set({'once','daily'})
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Transaction prices file not found: {path}")
@@ -198,7 +238,11 @@ def load_transaction_prices(path: str) -> dict:
             f"Found: {list(df.columns)}"
         )
 
+    has_schedule = "ScheduleType" in df.columns
+
     prices = {}
+    schedule_modes = {}
+
     for _, row in df.iterrows():
         code = str(row["TransactionCode"]).strip()
         if code == "":
@@ -209,10 +253,24 @@ def load_transaction_prices(path: str) -> dict:
             continue
         prices[code] = price
 
+        modes = {"once"}  # default
+        if has_schedule:
+            raw = str(row["ScheduleType"]).strip().lower()
+            if raw == "daily":
+                modes = {"daily"}
+            elif raw == "both":
+                modes = {"once", "daily"}
+            elif raw == "once" or raw == "":
+                modes = {"once"}
+            else:
+                modes = {"once"}  # unknown value -> fall back to once
+
+        schedule_modes[code] = modes
+
     if not prices:
         raise ValueError("No valid transaction prices loaded from file.")
 
-    return prices
+    return prices, schedule_modes
 
 
 def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
@@ -279,6 +337,7 @@ def build_fixed_charges(
     arrivals_df: pd.DataFrame,
     departures_df: pd.DataFrame,
     transaction_prices: dict,
+    schedule_modes: dict,
 ) -> pd.DataFrame:
     """
     Join arrivals + departures, then build fixed charges table (max 499 rows).
@@ -286,17 +345,15 @@ def build_fixed_charges(
     For each matched reservation:
     - ExternalId: long ID (500xxxx) from arrivals
     - AccountId: BNC-... from departures
-    - PostingDate: random valid posting date respecting business date and not checkout
-    - FromDate = PostingDate
-    - ToDate   = PostingDate
+    - TransactionCode: random code from transaction_prices
+    - ScheduleType: random choice from schedule_modes[code]
+    - Posting dates obey business-date and checkout rules.
     """
 
     if not transaction_prices:
         raise ValueError("transaction_prices dictionary is empty.")
 
     transaction_codes = list(transaction_prices.keys())
-
-    # Business date = today's date
     business_date = date.today()
 
     # 1) ConfIdent + ExternalId from arrivals
@@ -346,18 +403,32 @@ def build_fixed_charges(
         external_id = str(row["ExternalId"])
         account_id = str(row["AccountId"])
 
-        posting_date = _choose_posting_date(
-            row["Arr. Date & Time"],
-            row["Dep. Date & Time"],
-            business_date=business_date,
-        )
-
-        if not posting_date:
-            # No valid posting date -> skip this reservation
-            continue
-
+        # Choose a transaction code
         tx_code = random.choice(transaction_codes)
         unit_price = transaction_prices[tx_code]
+
+        # Determine allowed schedule modes for this code
+        allowed = schedule_modes.get(tx_code, {"once"})
+        if "daily" in allowed and "once" in allowed:
+            chosen_mode = random.choice(["Once", "Daily"])
+        elif "daily" in allowed:
+            chosen_mode = "Daily"
+        else:
+            chosen_mode = "Once"
+
+        arr_text = row["Arr. Date & Time"]
+        dep_text = row["Dep. Date & Time"]
+
+        if chosen_mode == "Once":
+            posting_date = _choose_once_posting_date(arr_text, dep_text, business_date)
+            if not posting_date:
+                continue
+            from_date = posting_date
+            to_date = posting_date
+        else:  # Daily
+            from_date, to_date = _choose_daily_period(arr_text, dep_text, business_date)
+            if not from_date:
+                continue
 
         rec = {
             "ExternalSystemCode": "PMS",
@@ -367,9 +438,9 @@ def build_fixed_charges(
             "Quantity": 1,
             "UnitPrice": unit_price,
             "Comment": "Migration",
-            "ScheduleType": "Once",
-            "FromDate": posting_date,
-            "ToDate": posting_date,
+            "ScheduleType": chosen_mode,
+            "FromDate": from_date,
+            "ToDate": to_date,
             "CustomPostingDates": "",
             "DayOfMonth": "",
             "MonthsBetweenPostings": "",
@@ -420,10 +491,10 @@ def main():
     arrivals = pd.read_csv(args.arrivals)
     departures = pd.read_csv(args.departures)
 
-    # Load transaction prices
-    transaction_prices = load_transaction_prices(args.txfile)
+    # Load transaction prices + schedule modes
+    transaction_prices, schedule_modes = load_transaction_prices(args.txfile)
 
-    fixed_df = build_fixed_charges(arrivals, departures, transaction_prices)
+    fixed_df = build_fixed_charges(arrivals, departures, transaction_prices, schedule_modes)
 
     # Write output
     fixed_df.to_csv(args.output, index=False)
