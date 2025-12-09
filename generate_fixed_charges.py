@@ -14,8 +14,8 @@ From ARRIVALS:
 
 From DEPARTURES:
     * AccountId (BNC-...)
-    * Arr. Date & Time, Dep. Date & Time (stay dates)
-      (column names detected flexibly)
+    * Arrival / Departure dates (column names detected flexibly, e.g. "Arrival",
+      "Arrival & ETA", "Departure & ETD", etc.)
 
 For each matched reservation (max 499):
     * Choose a TransactionCode at random
@@ -90,6 +90,7 @@ def _to_iso_date(s: str) -> str:
     if not s:
         return ""
 
+    # Try to find a date-like chunk inside the string
     patterns = [
         r"\d{2}/\d{2}/\d{4}",
         r"\d{2}-\d{2}-\d{4}",
@@ -106,6 +107,7 @@ def _to_iso_date(s: str) -> str:
             date_str = m.group(0)
             break
 
+    # If we didn't find a substring, maybe the whole string *is* the date
     if date_str is None:
         date_str = s
 
@@ -122,7 +124,7 @@ def _to_iso_date(s: str) -> str:
     for fmt in formats:
         try:
             dt = datetime.strptime(date_str, fmt).date()
-            return dt.isoformat()
+            return dt.isoformat()  # always yyyy-mm-dd
         except ValueError:
             continue
 
@@ -211,12 +213,17 @@ def _is_digits(s: str) -> bool:
 
 def _find_column(df: pd.DataFrame, candidates, context: str) -> str:
     """
-    Find the first existing column in df among candidates.
+    Find the first existing column in df among candidates (case-insensitive, trimmed).
+    Return the actual column name from the DataFrame.
     Raise a clear error if none is found.
     """
-    for c in candidates:
-        if c in df.columns:
-            return c
+    normalized = {col.strip().lower(): col for col in df.columns}
+
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in normalized:
+            return normalized[key]
+
     raise ValueError(
         f"Departures file must contain one of columns {candidates} for {context}. "
         f"Found columns: {list(df.columns)}"
@@ -371,7 +378,14 @@ def build_fixed_charges(
     # Detect columns flexibly
     conf_col = _find_column(
         dep,
-        ["Conf. # / Ident. #", "Conf # / Ident #", "Conf#/Ident#", "Confirmation", "Conf No", "Confirmation #"],
+        [
+            "Conf. # / Ident. #",
+            "Conf # / Ident #",
+            "Conf#/Ident#",
+            "Confirmation",
+            "Conf No",
+            "Confirmation #",
+        ],
         "confirmation / ConfIdent",
     )
     acc_col = _find_column(
@@ -381,12 +395,26 @@ def build_fixed_charges(
     )
     arr_col = _find_column(
         dep,
-        ["Arr. Date & Time", "Arrival Date & Time", "Arr. Date", "Arrival Date", "Arrival"],
+        [
+            "Arr. Date & Time",
+            "Arrival Date & Time",
+            "Arr. Date",
+            "Arrival Date",
+            "Arrival",
+            "Arrival & ETA",
+        ],
         "arrival date",
     )
     dep_col = _find_column(
         dep,
-        ["Dep. Date & Time", "Departure Date & Time", "Dep. Date", "Departure Date", "Departure"],
+        [
+            "Dep. Date & Time",
+            "Departure Date & Time",
+            "Dep. Date",
+            "Departure Date",
+            "Departure",
+            "Departure & ETD",
+        ],
         "departure date",
     )
 
