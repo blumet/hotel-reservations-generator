@@ -16,6 +16,7 @@ From DEPARTURES:
     * AccountId (BNC-...)
     * Arrival / Departure dates (column names detected flexibly, e.g. "Arrival",
       "Arrival & ETA", "Departure & ETD", etc.)
+    * ConfIdent column detected flexibly (including "Name" as fallback)
 
 For each matched reservation (max 499):
     * Choose a TransactionCode at random
@@ -90,7 +91,6 @@ def _to_iso_date(s: str) -> str:
     if not s:
         return ""
 
-    # Try to find a date-like chunk inside the string
     patterns = [
         r"\d{2}/\d{2}/\d{4}",
         r"\d{2}-\d{2}-\d{4}",
@@ -107,7 +107,6 @@ def _to_iso_date(s: str) -> str:
             date_str = m.group(0)
             break
 
-    # If we didn't find a substring, maybe the whole string *is* the date
     if date_str is None:
         date_str = s
 
@@ -296,7 +295,7 @@ def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataF
     From the arrivals report, extract for each reservation:
 
     - ConfIdent: numeric row where Arrival looks like a date
-                 (matches 'Conf. # / Ident. #' in departures)
+                 (matches 'Conf. # / Ident. #' in departures, or Name fallback)
     - ExternalId: numeric row nearby where Arrival is HOLD / PRE / OFF
                   (long external ID, e.g. 5006885)
 
@@ -312,13 +311,9 @@ def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataF
 
     df["idx"] = df.index
 
-    # Numeric rows
     numeric = df[df["Name"].astype(str).apply(_is_digits)]
 
-    # ConfIdent candidates: numeric + Arrival looks like a date
     conf_rows = numeric[numeric["Arrival"].apply(_looks_like_date)]
-
-    # ExternalId candidates: numeric + Arrival in HOLD/PRE/OFF
     ext_rows = numeric[numeric["Arrival"].isin(["HOLD", "PRE", "OFF"])]
 
     if conf_rows.empty or ext_rows.empty:
@@ -385,6 +380,10 @@ def build_fixed_charges(
             "Confirmation",
             "Conf No",
             "Confirmation #",
+            "Reservation #",
+            "Reservation No",
+            "Res #",
+            "Name",  # fallback for exports where the numeric ID is in Name
         ],
         "confirmation / ConfIdent",
     )
