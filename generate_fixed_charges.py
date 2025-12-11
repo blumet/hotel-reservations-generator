@@ -32,6 +32,7 @@ import os
 import random
 import re
 from datetime import datetime, timedelta, date
+
 import pandas as pd
 
 MAX_RECORDS = 499
@@ -102,14 +103,14 @@ def _to_iso_date(s: str) -> str:
     fmts = [
         "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d",
         "%d/%m/%y", "%d-%m-%y",
-        "%d-%b-%Y", "%d-%b-%y"
+        "%d-%b-%Y", "%d-%b-%y",
     ]
 
     for fmt in fmts:
         try:
             dt = datetime.strptime(date_str, fmt).date()
             return dt.isoformat()
-        except:
+        except ValueError:
             continue
 
     return ""
@@ -126,7 +127,7 @@ def _looks_like_date(s: str) -> bool:
     return _to_iso_date(s) != ""
 
 
-def _choose_once_posting_date(arrival_text, departure_text, business_date):
+def _choose_once_posting_date(arrival_text, departure_text, business_date: date) -> str:
     """Pick a single valid date (not past, not checkout)."""
     arr = _parse_to_date(arrival_text)
     dep = _parse_to_date(departure_text)
@@ -142,7 +143,7 @@ def _choose_once_posting_date(arrival_text, departure_text, business_date):
     return (earliest + timedelta(days=offset)).isoformat()
 
 
-def _choose_daily_period(arrival_text, departure_text, business_date):
+def _choose_daily_period(arrival_text, departure_text, business_date: date):
     """Pick FROM and TO for daily schedule, inside valid stay."""
     arr = _parse_to_date(arrival_text)
     dep = _parse_to_date(departure_text)
@@ -172,14 +173,17 @@ def _is_digits(s: str):
     return s.strip().isdigit()
 
 
-def _find_column(df, candidates, context):
-    """Flexible column detection: lowercased, trimmed."""
-    norm = {col.strip().lower(): col for col in df.columns}
+def _find_column(df: pd.DataFrame, candidates, context: str) -> str:
+    """
+    Flexible column detection: lowercased, trimmed.
+    Returns the actual column name from df.
+    """
+    normalized = {col.strip().lower(): col for col in df.columns}
 
-    for c in candidates:
-        key = c.strip().lower()
-        if key in norm:
-            return norm[key]
+    for cand in candidates:
+        key = cand.strip().lower()
+        if key in normalized:
+            return normalized[key]
 
     raise ValueError(
         f"Departures file must contain one of: {candidates} for {context}.\n"
@@ -187,11 +191,27 @@ def _find_column(df, candidates, context):
     )
 
 
+def _normalize_id_str(v) -> str:
+    """
+    Normalize ConfIdent-like values so 30319.0 -> '30319', 30319 -> '30319', '30319' -> '30319'.
+    """
+    if pd.isna(v):
+        return ""
+    s = str(v).strip()
+    if not s:
+        return ""
+    if "." in s:
+        left, right = s.split(".", 1)
+        if left.isdigit() and set(right) <= {"0"}:
+            s = left
+    return s
+
+
 def load_transaction_prices(path):
     df = pd.read_csv(path)
 
     if "TransactionCode" not in df.columns or "UnitPrice" not in df.columns:
-        raise ValueError("transaction_prices.csv missing required columns.")
+        raise ValueError("transaction_prices.csv missing required columns TransactionCode and UnitPrice.")
 
     prices = {}
     schedule_modes = {}
@@ -203,7 +223,7 @@ def load_transaction_prices(path):
 
         try:
             price = float(row["UnitPrice"])
-        except:
+        except Exception:
             continue
 
         prices[code] = price
@@ -216,6 +236,9 @@ def load_transaction_prices(path):
         else:
             schedule_modes[code] = {"once"}
 
+    if not prices:
+        raise ValueError("No valid transaction prices loaded from transaction_prices.csv.")
+
     return prices, schedule_modes
 
 
@@ -223,7 +246,12 @@ def load_transaction_prices(path):
 # ARRIVAL → ConfIdent / ExternalId
 # -------------------------------------------------------
 
-def extract_arrival_ids(arrivals_df, window=20):
+def extract_arrival_ids(arrivals_df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    """
+    From arrivals:
+    - ConfIdent = numeric Name where Arrival looks like a date
+    - ExternalId = numeric Name nearby where Arrival is HOLD/PRE/OFF
+    """
     df = arrivals_df.copy()
 
     if "Name" not in df.columns or "Arrival" not in df.columns:
@@ -236,24 +264,21 @@ def extract_arrival_ids(arrivals_df, window=20):
     ext_rows = numeric[numeric["Arrival"].isin(["HOLD", "PRE", "OFF"])]
 
     if conf_rows.empty or ext_rows.empty:
-        raise ValueError("Could not detect ConfIdent and ExternalId rows.")
+        raise ValueError("Could not detect ConfIdent and ExternalId rows from arrivals.")
 
     pairs = []
     for _, ext in ext_rows.iterrows():
         idx = ext["idx"]
-        nearby = conf_rows[
-            (conf_rows["idx"] >= idx - window)
-            & (conf_rows["idx"] <= idx + window)
-        ]
+        nearby = conf_rows[(conf_rows["idx"] >= idx - window) & (conf_rows["idx"] <= idx + window)]
         if nearby.empty:
             continue
         nearest = nearby.iloc[(nearby["idx"] - idx).abs().argsort().iloc[0]]
-        pairs.append((
-            str(nearest["Name"]).strip(),
-            str(ext["Name"]).strip(),
-        ))
+        conf_id = str(nearest["Name"]).strip()
+        ext_id = str(ext["Name"]).strip()
+        pairs.append((conf_id, ext_id))
 
     df_pairs = pd.DataFrame(pairs, columns=["ConfIdent", "ExternalId"])
+    df_pairs["ConfIdent"] = df_pairs["ConfIdent"].apply(_normalize_id_str)
     df_pairs = df_pairs.drop_duplicates(subset=["ConfIdent"])
     return df_pairs
 
@@ -262,10 +287,18 @@ def extract_arrival_ids(arrivals_df, window=20):
 # MAIN BUILD FUNCTION
 # -------------------------------------------------------
 
-def build_fixed_charges(arrivals_df, departures_df, transaction_prices, schedule_modes):
+def build_fixed_charges(
+    arrivals_df: pd.DataFrame,
+    departures_df: pd.DataFrame,
+    transaction_prices: dict,
+    schedule_modes: dict,
+) -> pd.DataFrame:
     business_date = date.today()
+
+    # 1) ConfIdent / ExternalId from arrivals
     arr_ids = extract_arrival_ids(arrivals_df)
 
+    # 2) Departures columns
     dep = departures_df.copy()
 
     conf_col = _find_column(
@@ -277,60 +310,43 @@ def build_fixed_charges(arrivals_df, departures_df, transaction_prices, schedule
             "Conf No",
             "Confirmation #",
             "Reservation #",
-            "Name"              # fallback
+            "Name",  # fallback
         ],
-        "ConfIdent"
+        "ConfIdent",
     )
-
     acc_col = _find_column(
         dep,
-        [
-            "Account #",
-            "Acc. #",
-            "Acc #",
-            "Account",
-            "Account No",
-            "Account No."
-        ],
-        "AccountId"
+        ["Account #", "Acc. #", "Acc #", "Account", "Account No", "Account No."],
+        "AccountId",
     )
-
     arr_col = _find_column(
         dep,
-        [
-            "Arrival & ETA",
-            "Arr. Date & Time",
-            "Arrival Date & Time",
-            "Arrival Date",
-            "Arrival"
-        ],
-        "ArrivalDate"
+        ["Arrival & ETA", "Arr. Date & Time", "Arrival Date & Time", "Arrival Date", "Arrival"],
+        "ArrivalDate",
     )
-
     dep_col = _find_column(
         dep,
-        [
-            "Departure & ETD",
-            "Dep. Date & Time",
-            "Departure Date & Time",
-            "Departure Date",
-            "Departure"
-        ],
-        "DepartureDate"
+        ["Departure & ETD", "Dep. Date & Time", "Departure Date & Time", "Departure Date", "Departure"],
+        "DepartureDate",
     )
 
     dep_small = dep[[conf_col, acc_col, arr_col, dep_col]].copy()
-    dep_small = dep_small.rename(columns={
-        conf_col: "ConfIdent",
-        acc_col: "AccountId",
-        arr_col: "Arr",
-        dep_col: "Dep",
-    })
+    dep_small = dep_small.rename(
+        columns={
+            conf_col: "ConfIdent",
+            acc_col: "AccountId",
+            arr_col: "Arr",
+            dep_col: "Dep",
+        }
+    )
 
-    dep_small["ConfIdent"] = dep_small["ConfIdent"].astype(str).str.strip()
-    arr_ids["ConfIdent"] = arr_ids["ConfIdent"].astype(str).str.strip()
+    # Normalize IDs before joining
+    dep_small["ConfIdent"] = dep_small["ConfIdent"].apply(_normalize_id_str)
+    arr_ids["ConfIdent"] = arr_ids["ConfIdent"].apply(_normalize_id_str)
 
     merged = arr_ids.merge(dep_small, on="ConfIdent", how="inner")
+
+    # Only BNC accounts
     merged = merged[merged["AccountId"].astype(str).str.startswith("BNC")]
 
     records = []
@@ -362,31 +378,30 @@ def build_fixed_charges(arrivals_df, departures_df, transaction_prices, schedule
                 continue
             from_date = post
             to_date = post
-
         else:  # Daily
             from_date, to_date = _choose_daily_period(arr_text, dep_text, business_date)
             if not from_date:
                 continue
 
-        rec = {
-            "ExternalSystemCode": "PMS",
-            "ExternalId": external_id,
-            "AccountId": account_id,
-            "TransactionCode": tx_code,
-            "Quantity": 1,
-            "UnitPrice": price,
-            "Comment": "Migration",
-            "ScheduleType": schedule,
-            "FromDate": from_date,
-            "ToDate": to_date,
-            "CustomPostingDates": "",
-            "DayOfMonth": "",
-            "MonthsBetweenPostings": "",
-            "DaysOfWeek": "",
-            "OrdinalOccurenceOfDayOfWeek": "",
-        }
-
-        records.append(rec)
+        records.append(
+            {
+                "ExternalSystemCode": "PMS",
+                "ExternalId": external_id,
+                "AccountId": account_id,
+                "TransactionCode": tx_code,
+                "Quantity": 1,
+                "UnitPrice": price,
+                "Comment": "Migration",
+                "ScheduleType": schedule,
+                "FromDate": from_date,
+                "ToDate": to_date,
+                "CustomPostingDates": "",
+                "DayOfMonth": "",
+                "MonthsBetweenPostings": "",
+                "DaysOfWeek": "",
+                "OrdinalOccurenceOfDayOfWeek": "",
+            }
+        )
 
     return pd.DataFrame(records)
 
@@ -400,16 +415,21 @@ def main():
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
+    if not os.path.exists(args.arrivals):
+        raise FileNotFoundError(f"Arrivals file not found: {args.arrivals}")
+    if not os.path.exists(args.departures):
+        raise FileNotFoundError(f"Departures file not found: {args.departures}")
+
     arrivals = pd.read_csv(args.arrivals)
     departures = pd.read_csv(args.departures)
 
     tx_prices, schedule_modes = load_transaction_prices(args.txfile)
 
-    df = build_fixed_charges(arrivals, departures, tx_prices, schedule_modes)
+    fixed_df = build_fixed_charges(arrivals, departures, tx_prices, schedule_modes)
 
-    df.to_csv(args.output, index=False)
+    fixed_df.to_csv(args.output, index=False)
     print(f"Generated: {args.output}")
-    print(f"Rows: {len(df)}")
+    print(f"Rows: {len(fixed_df)}")
 
 
 if __name__ == "__main__":
