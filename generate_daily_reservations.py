@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Generate a daily reservations CSV (499 rows) following business rules,
-using weighted room type distribution, PMS occupancy bias,
-and persistent ExternalIDs.
+Generate a reservations CSV (499 rows) following business rules.
 
-ExternalID/profile state is stored in state.json and updated on every run.
+Key behaviors:
+- Progressive fill: generates arrivals starting from tomorrow, moving forward only when needed
+- Overbooking-safe: NEVER exceeds MAX_OCCUPANCY_PCT on ANY night of the stay
+- Uses PMS occupancy file (2 years) for occupancy-by-date
+- ExternalID and profile cycling persist in state/state.json (updated every run)
 """
 
 from pathlib import Path
@@ -14,32 +16,43 @@ import json
 import csv
 from urllib.request import urlopen
 
+# ----------------------------
+# Paths
+# ----------------------------
 OUTPUT_DIR = Path("./output")
 STATE_DIR = Path("./state")
 STATE_FILE = STATE_DIR / "state.json"
 
-# URL of the PMS occupancy file stored in GitHub
+# ----------------------------
+# Occupancy source (2-year file)
+# ----------------------------
 OCCUPANCY_URL = (
     "https://raw.githubusercontent.com/blumet/hotel-reservations-generator/"
     "refs/heads/main/data/BusinessontheBooks.csv"
 )
 
-LOW_OCCUPANCY_THRESHOLD = 60.0  # percentage (days below this are "low occupancy")
+# ----------------------------
+# Hotel rules
+# ----------------------------
+HOTEL_ROOMS = 183
+MAX_OCCUPANCY_PCT = 90.0  # hard cap: do not exceed on any night
+DELTA_PCT_PER_BOOKING_NIGHT = 100.0 / HOTEL_ROOMS  # ~0.546%
 
+# Rate restriction rule (unchanged):
+# If arrival-date occupancy > 85%, allow only these rates (unless BAREX forced).
+HIGH_OCC_RATE_THRESHOLD = 85.0
+HIGH_OCC_ALLOWED_RATES = ["RACK", "BARRES", "BAR00"]
+
+# ----------------------------
+# Config
+# ----------------------------
 CONFIG = {
-    # Used ONLY when state.json doesn't exist yet.
-    # First generated ExternalID will be external_id_start + 1.
-    "external_id_start": 5007119,
+    "rows_per_run": 499,
+    "external_id_start": 5007119,  # used only if state.json doesn't exist yet
     "profile_set_1": [2000042, 2002529],
     "profile_set_2": [1000042, 1001335],
     "allow_COR25": False,
-    "date_distribution": {  # Fallback: weighted random date periods
-        "next_30_days": 0.5,   # 50%
-        "next_60_days": 0.2,   # 20%
-        "next_90_days": 0.2,   # 20%
-        "next_120_days": 0.1   # 10%
-    },
-    "room_distribution": {  # Weighted room type probabilities
+    "room_distribution": {
         "KGDX": 0.30,
         "TWDX": 0.20,
         "KGSP": 0.10,
@@ -65,7 +78,7 @@ COMPANIES = [
     "ABN Amro", "CNN News Group", "BMW", "Deloitte"
 ]
 
-# Rate pool (BARRES added)
+# Rate pool (BARRES included)
 RATE_CODES_POOL = ["BAR00", "BAR10", "OTA1", "CORL25", "OPQ", "DAY", "BARAD", "RACK", "BARRES"]
 if CONFIG["allow_COR25"]:
     RATE_CODES_POOL.append("COR25")
@@ -76,22 +89,22 @@ PREFERENCE_CODES = [
     "POW", "QUI", "SAF", "SEA", "SM", "SPAB", "TWIN"
 ]
 
-# ------------------------------------------------------------
-# Occupancy handling: load low-occupancy days from external CSV
-# ------------------------------------------------------------
+# ============================================================
+# Occupancy handling
+# ============================================================
 
 def load_occupancy_data():
     """
-    Download occupancy data from OCCUPANCY_URL and parse dates & occupancy %.
+    Downloads occupancy data from OCCUPANCY_URL and parses dates + occupancy%.
 
     Assumptions (from your PMS export):
-      - Column 1 (index 1) = "Date" (DD/MM/YYYY)
+      - Column 1 (index 1) = "Date" (DD/MM/YYYY) (day name may follow)
       - Column 5 (index 5) = "Occupancy%"
     """
     rows = []
     try:
         with urlopen(OCCUPANCY_URL) as resp:
-            content = resp.read().decode("utf-8-sig")  # handle BOM if present
+            content = resp.read().decode("utf-8-sig")
     except Exception as exc:
         print(f"⚠️ Could not load occupancy data from {OCCUPANCY_URL}: {exc}")
         return rows
@@ -106,8 +119,8 @@ def load_occupancy_data():
         print("⚠️ Occupancy CSV has fewer than 6 columns; cannot read Occupancy%.")
         return rows
 
-    date_idx = 1  # "Date" column
-    occ_idx = 5   # "Occupancy%" column
+    date_idx = 1
+    occ_idx = 5
 
     for row in reader:
         if len(row) <= occ_idx:
@@ -124,11 +137,12 @@ def load_occupancy_data():
         except ValueError:
             continue
 
-        # Try DD/MM/YYYY, fallback to YYYY-MM-DD
         dt = None
+        # First token usually holds the date even if day name exists
+        date_token = date_str.split()[0]
         for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
             try:
-                dt = datetime.strptime(date_str, fmt).date()
+                dt = datetime.strptime(date_token, fmt).date()
                 break
             except ValueError:
                 continue
@@ -140,159 +154,121 @@ def load_occupancy_data():
     return rows
 
 
-def compute_low_occupancy(threshold=LOW_OCCUPANCY_THRESHOLD):
-    """Return (dates, weights) for days below the given occupancy threshold."""
-    data = load_occupancy_data()
-    if not data:
-        return [], []
-
-    low_days = [entry for entry in data if entry["occupancy"] < threshold]
-
-    # If nothing is strictly below threshold, fall back to using all days
-    if not low_days:
-        low_days = data
-
-    dates = [entry["date"] for entry in low_days]
-    weights = []
-    for entry in low_days:
-        gap = threshold - entry["occupancy"]
-        # The lower the occupancy, the larger the weight → more arrivals generated
-        if gap <= 0:
-            weight = 1.0
-        else:
-            weight = gap + 1.0
-        weights.append(weight)
-
-    return dates, weights
-
-
-LOW_OCCUPANCY_DATES, LOW_OCCUPANCY_WEIGHTS = compute_low_occupancy()
-
-# Map of date -> occupancy% for easy lookup (used for >85% rule)
 _OCC_DATA = load_occupancy_data()
-OCCUPANCY_BY_DATE = {entry["date"]: entry["occupancy"] for entry in _OCC_DATA}
+OCCUPANCY_BY_DATE = {e["date"]: e["occupancy"] for e in _OCC_DATA}
+OCCUPANCY_DATES_SORTED = sorted(OCCUPANCY_BY_DATE.keys())
 
-# ------------------------------------------------------------
-# State handling (persistent tracking for ExternalID and ProfileID)
-# ------------------------------------------------------------
+# ============================================================
+# State handling (ExternalID, ProfileID, and progressive cursor)
+# ============================================================
 
 def build_profile_cycle():
     s1 = list(range(CONFIG["profile_set_1"][0], CONFIG["profile_set_1"][1] + 1))
     s2 = list(range(CONFIG["profile_set_2"][0], CONFIG["profile_set_2"][1] + 1))
     return sorted(s1 + s2)
 
+
 PROFILE_CYCLE = build_profile_cycle()
 
+
 def load_state():
-    """Load state from file, or initialize if missing."""
+    """
+    state.json schema:
+      - last_external_id: int
+      - next_profile_index: int
+      - cursor_date: YYYY-MM-DD  (earliest date to try filling next)
+    """
     if STATE_FILE.exists():
         with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    # First ever run: start from CONFIG
-    return {"last_external_id": CONFIG["external_id_start"], "next_profile_index": 0}
+            state = json.load(f)
+    else:
+        state = {"last_external_id": CONFIG["external_id_start"], "next_profile_index": 0}
+
+    if "cursor_date" not in state:
+        state["cursor_date"] = (datetime.today().date() + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    return state
+
 
 def save_state(state):
-    """Save state persistently on every run."""
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
+
 def next_external_id(state):
-    """Generate next sequential ExternalID."""
     state["last_external_id"] += 1
     return state["last_external_id"]
 
+
 def next_profile_id(state):
-    """Cycle through available profile IDs."""
     idx = state["next_profile_index"]
     pid = PROFILE_CYCLE[idx]
     state["next_profile_index"] = (idx + 1) % len(PROFILE_CYCLE)
     return pid
 
-# ------------------------------------------------------------
-# Helper: random time in ISO format for ETA/ETD
-# ------------------------------------------------------------
+# ============================================================
+# Overbooking-safe occupancy math
+# ============================================================
+
+def projected_occupancy(date_obj, added_pct_by_date):
+    base = OCCUPANCY_BY_DATE.get(date_obj, None)
+    if base is None:
+        # Your file covers 2 years, but this protects against gaps.
+        return None
+    return base + added_pct_by_date.get(date_obj, 0.0)
+
+
+def can_place_stay(arrival, nights, added_pct_by_date):
+    for i in range(nights):
+        d = arrival + timedelta(days=i)
+        proj = projected_occupancy(d, added_pct_by_date)
+        if proj is None:
+            return False
+        if proj + DELTA_PCT_PER_BOOKING_NIGHT > MAX_OCCUPANCY_PCT:
+            return False
+    return True
+
+
+def commit_stay(arrival, nights, added_pct_by_date):
+    for i in range(nights):
+        d = arrival + timedelta(days=i)
+        added_pct_by_date[d] = added_pct_by_date.get(d, 0.0) + DELTA_PCT_PER_BOOKING_NIGHT
+
+# ============================================================
+# Helpers
+# ============================================================
 
 def random_time_iso(date_obj):
-    """Return ISO 8601 timestamp with random time between 05:00 and 23:45."""
     hour = random.randint(5, 23)
     minute = random.choice([0, 15, 30, 45])
     dt = datetime.combine(date_obj, time(hour, minute))
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-# ------------------------------------------------------------
-# Helper: arrival date (prefer low-occupancy days, fallback to CONFIG)
-# ------------------------------------------------------------
-
-def pick_arrival_date(today):
-    """Pick an arrival date, preferring low-occupancy days from the PMS export.
-
-    If LOW_OCCUPANCY_DATES is available, choose from those dates using
-    LOW_OCCUPANCY_WEIGHTS so that the lowest occupancy dates get the most
-    new reservations. If the occupancy file cannot be loaded, fall back
-    to the original CONFIG-based weighted date logic.
-    """
-    if LOW_OCCUPANCY_DATES:
-        return random.choices(
-            LOW_OCCUPANCY_DATES,
-            weights=LOW_OCCUPANCY_WEIGHTS,
-            k=1
-        )[0]
-
-    # Fallback: original behaviour using relative date windows
-    dist = CONFIG["date_distribution"]
-    roll = random.random()
-    cumulative = 0
-
-    if roll < (cumulative := cumulative + dist["next_30_days"]):
-        start, end = 1, 30
-    elif roll < (cumulative := cumulative + dist["next_60_days"]):
-        start, end = 31, 60
-    elif roll < (cumulative := cumulative + dist["next_90_days"]):
-        start, end = 61, 90
-    else:
-        start, end = 91, 120
-
-    return today + timedelta(days=random.randint(start, end))
-
-# ------------------------------------------------------------
-# Room type picker (weighted)
-# ------------------------------------------------------------
 
 def pick_room_type():
-    """Randomly select a room type using weighted probabilities."""
     room_types = list(CONFIG["room_distribution"].keys())
     weights = list(CONFIG["room_distribution"].values())
     return random.choices(room_types, weights=weights, k=1)[0]
 
-# ------------------------------------------------------------
-# Business logic for rates, companies, preferences
-# ------------------------------------------------------------
+
+def pick_preference():
+    return random.choice(PREFERENCE_CODES) if random.random() < 0.4 else ""
+
 
 def pick_rate_and_company(room_type, arrival_date):
-    """
-    Assign rate plan and company based on:
-    - Room type (BAREX for KCDX/TCDX/KCST)
-    - Occupancy% for the arrival date (>85% → only RACK/BARRES/BAR00)
-    - Normal rate pool otherwise
-    """
-    # Rule 1: BAREX exclusively for certain room types
+    # BAREX exclusively for these room types
     if room_type in {"KCDX", "TCDX", "KCST"}:
         return "BAREX", ""
 
-    # Look up occupancy for the arrival date, if available
-    occupancy = OCCUPANCY_BY_DATE.get(arrival_date)
-
-    if occupancy is not None and occupancy > 85:
-        # High occupancy: restrict rate codes
-        candidate_pool = ["RACK", "BARRES", "BAR00"]
+    occ = OCCUPANCY_BY_DATE.get(arrival_date)
+    if occ is not None and occ > HIGH_OCC_RATE_THRESHOLD:
+        candidate_pool = HIGH_OCC_ALLOWED_RATES
     else:
-        # Normal day: full rate pool
         candidate_pool = RATE_CODES_POOL
 
     rate = random.choice(candidate_pool)
 
-    # Corporate rule for COR25 (if ever allowed in RATE_CODES_POOL)
     if rate == "COR25":
         company = random.choice(["Deloitte", "Saudi Aramco", "GrupoACS", "Volkswagen"])
     else:
@@ -300,94 +276,146 @@ def pick_rate_and_company(room_type, arrival_date):
 
     return rate, company
 
-def pick_preference():
-    """Randomly choose one preference code or leave blank."""
-    if random.random() < 0.4:
-        return random.choice(PREFERENCE_CODES)
-    return ""
 
-# ------------------------------------------------------------
-# Row generator
-# ------------------------------------------------------------
+def advance_cursor_one_day(state):
+    cd = datetime.strptime(state["cursor_date"], "%Y-%m-%d").date()
+    state["cursor_date"] = (cd + timedelta(days=1)).strftime("%Y-%m-%d")
 
-def generate_row(state, today=None):
-    if today is None:
-        today = datetime.today().date()
 
-    arrival = pick_arrival_date(today)
-    stay_len = random.randint(1, 10)
-    departure = arrival + timedelta(days=stay_len)
-    room_type = pick_room_type()
-    rate, company = pick_rate_and_company(room_type, arrival)
+def pick_arrival_date_progressive(state, today, added_pct_by_date):
+    """
+    Progressive fill:
+    - Start from cursor_date (>= tomorrow).
+    - Return the earliest date that still has headroom for at least 1 night.
+    - If a date is full, advance day by day.
+    """
+    cursor = datetime.strptime(state["cursor_date"], "%Y-%m-%d").date()
+    if cursor <= today:
+        cursor = today + timedelta(days=1)
+        state["cursor_date"] = cursor.strftime("%Y-%m-%d")
 
-    if room_type == "A1KB":
-        no_of_children = 1
-        child_age_bucket = "C1"
-    else:
-        no_of_children = ""
-        child_age_bucket = "C1"
+    # Safety limit: don't loop forever
+    for _ in range(10000):
+        proj = projected_occupancy(cursor, added_pct_by_date)
+        if proj is not None and proj + DELTA_PCT_PER_BOOKING_NIGHT <= MAX_OCCUPANCY_PCT:
+            state["cursor_date"] = cursor.strftime("%Y-%m-%d")
+            return cursor
 
-    eta = random_time_iso(arrival)
-    etd = random_time_iso(departure)
-    preference = pick_preference()
+        cursor += timedelta(days=1)
+        state["cursor_date"] = cursor.strftime("%Y-%m-%d")
 
-    return {
-        "profileId": next_profile_id(state),
-        "arrivaldate": arrival.strftime("%Y-%m-%d"),
-        "departuredate": departure.strftime("%Y-%m-%d"),
-        "RoomType": room_type,
-        "Room": "",
-        "DoNotMove": "",
-        "AdultAgeBucket": "A1",
-        "NoOfAdults": random.choice([1, 2]),
-        "ChildAgeBucket": child_age_bucket,
-        "NoOfChildren": no_of_children,
-        "RoomTypeToCharge": room_type,
-        "RatePlan": rate,
-        "CurrencyCode": "EUR",
-        "MarketSegment": random.choice(MARKET_SEGMENTS),
-        "GuaranteeType": random.choice(GUARANTEE_TYPES),
-        "Channel": random.choice(CHANNELS),
-        "Source": random.choice(SOURCES),
-        "companyProfile": company,
-        "TravelAgentProfile": "",
-        "Preferences": preference,
-        "AccompanyingGuestProfiles": "",
-        "Membership": "",
-        "ETA": eta,
-        "ETD": etd,
-        "TotalAmount": "",
-        "BreakdownAmount": "",
-        "Purpose": "",
-        "NoPost": "FALSE",
-        "ArrivalTransportType": "",
-        "ArrivalFlightNumber": "",
-        "ArrivalPickUpDateTime": "",
-        "ArrivalDetails": "",
-        "DepartureTransportType": "",
-        "DepartureFlightNumber": "",
-        "DeparturePickUpDateTime": "",
-        "DepartureDetails": "",
-        "GroupCode": "",
-        "LockPrice": "",
-        "LockReason": "",
-        "ExternalID": next_external_id(state),
-        "ExternalSystemCode": "PMS",
-        "AdditionalExternalSystems": "",
-        "ExternalSegmentNumber": "",
-        "BlockCode": ""
-    }
+    raise RuntimeError("Could not find any date with remaining headroom under the occupancy cap.")
 
-# ------------------------------------------------------------
-# Main CSV generator
-# ------------------------------------------------------------
+# ============================================================
+# Row generation (progressive + safe)
+# ============================================================
+
+def generate_row(state, today, added_pct_by_date):
+    """
+    Generates one reservation, filling dates progressively, without exceeding MAX_OCCUPANCY_PCT.
+    Prefers shorter stays first (1..10) so we can always fit.
+    """
+    for _ in range(200):  # retry budget
+        arrival = pick_arrival_date_progressive(state, today, added_pct_by_date)
+
+        # Prefer shorter stays first
+        stay_len = None
+        for candidate_len in range(1, 11):
+            if can_place_stay(arrival, candidate_len, added_pct_by_date):
+                stay_len = candidate_len
+                break
+
+        if stay_len is None:
+            # Arrival date can't take even a 1-night stay; move forward
+            advance_cursor_one_day(state)
+            continue
+
+        # Commit occupancy impact for all nights
+        commit_stay(arrival, stay_len, added_pct_by_date)
+
+        departure = arrival + timedelta(days=stay_len)
+        room_type = pick_room_type()
+        rate, company = pick_rate_and_company(room_type, arrival)
+
+        if room_type == "A1KB":
+            no_of_children = 1
+            child_age_bucket = "C1"
+        else:
+            no_of_children = ""
+            child_age_bucket = "C1"
+
+        eta = random_time_iso(arrival)
+        etd = random_time_iso(departure)
+
+        return {
+            "profileId": next_profile_id(state),
+            "arrivaldate": arrival.strftime("%Y-%m-%d"),
+            "departuredate": departure.strftime("%Y-%m-%d"),
+            "RoomType": room_type,
+            "Room": "",
+            "DoNotMove": "",
+            "AdultAgeBucket": "A1",
+            "NoOfAdults": random.choice([1, 2]),
+            "ChildAgeBucket": child_age_bucket,
+            "NoOfChildren": no_of_children,
+            "RoomTypeToCharge": room_type,
+            "RatePlan": rate,
+            "CurrencyCode": "EUR",
+            "MarketSegment": random.choice(MARKET_SEGMENTS),
+            "GuaranteeType": random.choice(GUARANTEE_TYPES),
+            "Channel": random.choice(CHANNELS),
+            "Source": random.choice(SOURCES),
+            "companyProfile": company,
+            "TravelAgentProfile": "",
+            "Preferences": pick_preference(),
+            "AccompanyingGuestProfiles": "",
+            "Membership": "",
+            "ETA": eta,
+            "ETD": etd,
+            "TotalAmount": "",
+            "BreakdownAmount": "",
+            "Purpose": "",
+            "NoPost": "FALSE",
+            "ArrivalTransportType": "",
+            "ArrivalFlightNumber": "",
+            "ArrivalPickUpDateTime": "",
+            "ArrivalDetails": "",
+            "DepartureTransportType": "",
+            "DepartureFlightNumber": "",
+            "DeparturePickUpDateTime": "",
+            "DepartureDetails": "",
+            "GroupCode": "",
+            "LockPrice": "",
+            "LockReason": "",
+            "ExternalID": next_external_id(state),
+            "ExternalSystemCode": "PMS",
+            "AdditionalExternalSystems": "",
+            "ExternalSegmentNumber": "",
+            "BlockCode": ""
+        }
+
+    raise RuntimeError("Could not place a reservation without exceeding the occupancy cap.")
+
+# ============================================================
+# Main
+# ============================================================
 
 def main():
+    if not OCCUPANCY_BY_DATE:
+        raise RuntimeError("No occupancy data loaded. Cannot run progressive fill safely.")
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
     state = load_state()
     today = datetime.today().date()
+
+    # Track added occupancy during THIS run so we never exceed cap
+    added_pct_by_date = {}
+
+    rows = []
+    for i in range(CONFIG["rows_per_run"]):
+        rows.append(generate_row(state, today=today, added_pct_by_date=added_pct_by_date))
 
     out_name = f"Reservations_{today.strftime('%Y%m%d')}.csv"
     out_path = OUTPUT_DIR / out_name
@@ -404,18 +432,18 @@ def main():
         "AdditionalExternalSystems","ExternalSegmentNumber","BlockCode"
     ]
 
-    rows = [generate_row(state, today=today) for _ in range(499)]
-
     with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
 
-    # Always persist state at the end
+    # Persist state every run
     save_state(state)
 
     print(f"✅ Generated {len(rows)} reservations -> {out_path}")
-    print(f"🔢 Last ExternalID now stored in state.json: {state['last_external_id']}")
+    print(f"🔢 Last ExternalID stored in state.json: {state['last_external_id']}")
+    print(f"📅 Next progressive cursor_date: {state['cursor_date']}")
+    print(f"🏨 Cap enforced: {MAX_OCCUPANCY_PCT}% | Rooms: {HOTEL_ROOMS} | Delta/night: {DELTA_PCT_PER_BOOKING_NIGHT:.3f}%")
 
 if __name__ == "__main__":
     main()
