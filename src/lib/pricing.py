@@ -1,3 +1,4 @@
+# /src/lib/pricing.py
 """
 Pricing engine.
 
@@ -21,7 +22,6 @@ Flat basis:
 
 Per-person plans still generated (A1/C1):
 - OPQ, STAFF, BB, WEL3, HB, WEL, GRPBASE, SUHB
-(you can remove more later if you want to reduce further)
 """
 
 from __future__ import annotations
@@ -309,9 +309,6 @@ def generate_pricing_rows(
             "ExtraGuest": eg,
         })
 
-    # Plans that should be FLAT-only
-    FLAT_ONLY = {"BAR00", "BAREX", "RACK", "CORL25", "WAL", "GRPHIG", "BARAPT", "BARSUIT"}
-
     d = start_date
     while d < end_date:
         mult = mult_map.get(d, 1.0)
@@ -366,7 +363,6 @@ def generate_pricing_rows(
                 new_flat = _to_str_or_blank(_rnd(float(bar_flat) * factor))
                 add_row("EUR", rt, plan, d, next_d, "", new_flat, "", "", "")
 
-        # Flat-only derived plans requested
         add_flat_plan("BAREX", 1.25)
         add_flat_plan("RACK", 1.35)
         add_flat_plan("CORL25", 0.75)
@@ -390,7 +386,6 @@ def generate_pricing_rows(
                     _to_str_or_blank(_rnd(float(eg) * factor)),
                 )
 
-        # Keep these per-person
         derive_pp_simple("OPQ", 0.80)
         derive_pp_simple("STAFF", 0.50)
 
