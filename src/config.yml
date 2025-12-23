@@ -1,11 +1,9 @@
 otb:
   file: data/BusinessontheBooks.csv
-  date_column: StayDate
-  capacity_column: Capacity
-  rooms_sold_column: RoomsSold
-  group_rooms_column: GroupRooms
-  cancelled_rooms_column: null
-  no_show_rooms_column: null
+  date_column: Date
+  capacity_column: Available Rooms
+  rooms_sold_column: Rooms Sold
+  group_rooms_column: null
 
 availability:
   # Optional: use this if your OTB does NOT include Capacity.
