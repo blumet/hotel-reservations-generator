@@ -4,18 +4,24 @@ Pricing engine.
 Responsibilities:
 - Load pricing template CSV (10-column schema)
 - Compute final rate multipliers per stay date
-- Generate BAR00 rows for horizon (with PRE flat-only handling)
-- Generate derived plans:
-  BAR00, BAREX, RACK, CORL25, OPQ, GRPBASE, GRPHIG, STAFF, WAL, HB, SUHB, WEL, BB, WEL3 (weekends-only),
-  BARAPT (A1KB/A2KB only), BARSUIT (KCST/KGST/PRE only, PRE flat-only)
+- Generate pricing rows for horizon (1-night rows, PMS-safe)
+- Generate derived plans and enforce your "flat-only" rules
 - Write:
-  - pricing output CSV (baseline + generated rows)
+  - pricing output CSV
   - changes CSV
   - GM-friendly summary TXT
 
-NEW (to reduce file size):
-- Generate daily rows internally then compress into multi-day bands when values are identical.
-  Safe: only merges when Flat/OneGuest/TwoGuests/ExtraGuest match exactly.
+IMPORTANT NEW RULES (as requested):
+Flat-only (no AgeBucketCode, Flat populated, per-person columns blank) for:
+- BAR00, BAREX, RACK, CORL25, WAL, GRPHIG, BARAPT, BARSUIT
+
+Flat basis:
+- For non-PRE room types, flat is taken from BAR00 TwoGuests(A1) after multiplier+rounding.
+- PRE remains flat-only using template Flat (AgeBucketCode blank) after multiplier+rounding.
+
+Per-person plans still generated (A1/C1):
+- OPQ, STAFF, BB, WEL3, HB, WEL, GRPBASE, SUHB
+(you can remove more later if you want to reduce further)
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ SCHEMA = [
 # --------------------------
 
 def _rnd(x: Optional[float]) -> Optional[int]:
+    """Normal rounding to whole EUR."""
     if x is None or (isinstance(x, float) and math.isnan(x)):
         return None
     return int(math.floor(float(x) + 0.5))
@@ -108,6 +115,10 @@ def _latest_by_key(df: pd.DataFrame, rateplan: str) -> pd.DataFrame:
 
 
 def _compute_ratio_dict(plan_latest: pd.DataFrame, bar_latest: pd.DataFrame) -> Dict[Tuple[str, str], Dict[str, float]]:
+    """
+    Compute per-key ratios (plan / BAR00) for OneGuest/TwoGuests/ExtraGuest and optionally Flat.
+    Only uses columns present (non-blank) in both plan and BAR00.
+    """
     ratios: Dict[Tuple[str, str], Dict[str, float]] = {}
     merged = plan_latest.merge(
         bar_latest,
@@ -119,8 +130,8 @@ def _compute_ratio_dict(plan_latest: pd.DataFrame, bar_latest: pd.DataFrame) -> 
         key = (r["RoomTypeCode"], r["AgeBucketCode"])
         ratios[key] = {}
         for col in ["Flat", "OneGuest", "TwoGuests", "ExtraGuest"]:
-            v_plan = _safe_float(r[f"{col}_plan"])
-            v_bar = _safe_float(r[f"{col}_bar"])
+            v_plan = _safe_float(r.get(f"{col}_plan"))
+            v_bar = _safe_float(r.get(f"{col}_bar"))
             if v_plan is None or v_bar is None or v_bar == 0:
                 continue
             ratios[key][col] = v_plan / v_bar
@@ -137,6 +148,10 @@ def compute_multipliers(
     cfg: Dict[str, Any],
     as_of: dt.date,
 ) -> pd.DataFrame:
+    """
+    Returns DataFrame with:
+      stay_date, final_multiplier, reason, event_name, event_multiplier
+    """
     df = daily_metrics_df.copy()
 
     ev = event_mult_df.copy()
@@ -238,59 +253,7 @@ def compute_multipliers(
 
 
 # --------------------------
-# Compression to reduce output size
-# --------------------------
-
-def compress_daily_rows_to_bands(daily_rows_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compress 1-night rows into longer bands when the *output values* are identical.
-    Safe: only merges when Flat/OneGuest/TwoGuests/ExtraGuest match exactly.
-    """
-    if daily_rows_df.empty:
-        return daily_rows_df.copy()
-
-    df = daily_rows_df.copy()
-    df["StartDate"] = pd.to_datetime(df["StartDate"]).dt.date
-    df["EndDate"] = pd.to_datetime(df["EndDate"]).dt.date
-
-    id_cols = [
-        "Currency", "RoomTypeCode", "RatePlanCode", "AgeBucketCode",
-        "Flat", "OneGuest", "TwoGuests", "ExtraGuest",
-    ]
-
-    df = df.sort_values(id_cols + ["StartDate", "EndDate"]).reset_index(drop=True)
-
-    out_rows = []
-    for _, g in df.groupby(id_cols, dropna=False, sort=False):
-        g = g.sort_values("StartDate").reset_index(drop=True)
-
-        cur_start = g.loc[0, "StartDate"]
-        cur_end = g.loc[0, "EndDate"]
-
-        for i in range(1, len(g)):
-            s = g.loc[i, "StartDate"]
-            e = g.loc[i, "EndDate"]
-            if s == cur_end:
-                cur_end = e
-            else:
-                row = g.loc[0, :].to_dict()
-                row["StartDate"] = cur_start.isoformat()
-                row["EndDate"] = cur_end.isoformat()
-                out_rows.append(row)
-
-                cur_start = s
-                cur_end = e
-
-        row = g.loc[0, :].to_dict()
-        row["StartDate"] = cur_start.isoformat()
-        row["EndDate"] = cur_end.isoformat()
-        out_rows.append(row)
-
-    return pd.DataFrame(out_rows, columns=SCHEMA)
-
-
-# --------------------------
-# Row generation
+# Row generation (PMS-safe, daily rows)
 # --------------------------
 
 def generate_pricing_rows(
@@ -300,10 +263,15 @@ def generate_pricing_rows(
     start_date: dt.date,
     end_date: dt.date,
 ) -> pd.DataFrame:
+    """
+    Generate pricing rows for each day in [start_date, end_date) as 1-night bands.
+    Applies your "flat-only" plan rules.
+    """
     bar_latest = _latest_by_key(template_df, "BAR00")
     if bar_latest.empty:
         raise ValueError("Template has no BAR00 rows; cannot build any pricing.")
 
+    # Ratio plans come from template structure
     hb_latest = _latest_by_key(template_df, "HB")
     wel_latest = _latest_by_key(template_df, "WEL")
     grp_latest = _latest_by_key(template_df, "GRPBASE")
@@ -312,6 +280,7 @@ def generate_pricing_rows(
     wel_ratios = _compute_ratio_dict(wel_latest, bar_latest) if not wel_latest.empty else {}
     grp_ratios = _compute_ratio_dict(grp_latest, bar_latest) if not grp_latest.empty else {}
 
+    # Baseline BAR00 values by (RoomTypeCode, AgeBucketCode)
     baseline: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
     for _, r in bar_latest.iterrows():
         key = (r["RoomTypeCode"], r["AgeBucketCode"])
@@ -340,66 +309,93 @@ def generate_pricing_rows(
             "ExtraGuest": eg,
         })
 
+    # Plans that should be FLAT-only
+    FLAT_ONLY = {"BAR00", "BAREX", "RACK", "CORL25", "WAL", "GRPHIG", "BARAPT", "BARSUIT"}
+
     d = start_date
     while d < end_date:
         mult = mult_map.get(d, 1.0)
         next_d = d + dt.timedelta(days=1)
 
-        bar_rows_per_key: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
-        pre_flat: Optional[str] = None
+        # Internal per-person BAR00 per (rt, ab) for other per-person plans
+        bar_pp_per_key: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
 
-        # BAR00
+        # Output BAR00 flat per room type (flat basis = TwoGuests(A1))
+        bar_flat_by_room: Dict[str, str] = {}
+
+        # ---------- 1) Build internal BAR00 per-person + output BAR00 flat ----------
         for (rt, ab), base_vals in baseline.items():
             currency = "EUR"
 
+            # PRE remains template flat-only (AgeBucket blank)
             if rt == "PRE" and ab == "":
                 base_flat = base_vals.get("Flat")
                 if base_flat is None:
                     continue
                 flat = _to_str_or_blank(_rnd(base_flat * mult))
-                pre_flat = flat
+                bar_flat_by_room["PRE"] = flat
                 add_row(currency, rt, "BAR00", d, next_d, "", flat, "", "", "")
                 continue
 
-            if ab == "":
+            # internal per-person BAR00 (used by per-person plans)
+            if ab != "":
+                base_og = base_vals.get("OneGuest")
+                base_tg = base_vals.get("TwoGuests")
+                base_eg = base_vals.get("ExtraGuest")
+                if base_og is not None and base_tg is not None and base_eg is not None:
+                    og = _to_str_or_blank(_rnd(base_og * mult))
+                    tg = _to_str_or_blank(_rnd(base_tg * mult))
+                    eg = _to_str_or_blank(_rnd(base_eg * mult))
+                    bar_pp_per_key[(rt, ab)] = (og, tg, eg)
+
+                    # Flat basis rule: TwoGuests(A1) -> Flat BAR00 (for non-PRE)
+                    if ab == "A1":
+                        bar_flat_by_room[rt] = tg
+
+        # Output BAR00 flat rows for all room types (non-PRE)
+        for rt, flat in bar_flat_by_room.items():
+            if rt == "PRE":
                 continue
+            add_row("EUR", rt, "BAR00", d, next_d, "", flat, "", "", "")
 
-            base_og = base_vals.get("OneGuest")
-            base_tg = base_vals.get("TwoGuests")
-            base_eg = base_vals.get("ExtraGuest")
-            if base_og is None or base_tg is None or base_eg is None:
-                continue
-
-            og = _to_str_or_blank(_rnd(base_og * mult))
-            tg = _to_str_or_blank(_rnd(base_tg * mult))
-            eg = _to_str_or_blank(_rnd(base_eg * mult))
-
-            add_row(currency, rt, "BAR00", d, next_d, ab, "", og, tg, eg)
-            bar_rows_per_key[(rt, ab)] = (og, tg, eg)
-
-        # Derived helper
-        def derive_simple(plan: str, factor: float, room_filter=None):
-            for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
+        # ---------- 2) Flat-only derived plans from BAR00 flat ----------
+        def add_flat_plan(plan: str, factor: float, room_filter=None):
+            for rt, bar_flat in bar_flat_by_room.items():
                 if room_filter and rt not in room_filter:
                     continue
+                new_flat = _to_str_or_blank(_rnd(float(bar_flat) * factor))
+                add_row("EUR", rt, plan, d, next_d, "", new_flat, "", "", "")
+
+        # Flat-only derived plans requested
+        add_flat_plan("BAREX", 1.25)
+        add_flat_plan("RACK", 1.35)
+        add_flat_plan("CORL25", 0.75)
+        add_flat_plan("WAL", 0.85)
+
+        # BARAPT flat-only (A1KB/A2KB only)
+        barapt_factor = float(cfg["rate_plans"]["BARAPT_multiplier"])
+        add_flat_plan("BARAPT", barapt_factor, room_filter={"A1KB", "A2KB"})
+
+        # BARSUIT flat-only (KCST/KGST/PRE only)
+        barsuit_factor = float(cfg["rate_plans"]["BARSUIT_multiplier"])
+        add_flat_plan("BARSUIT", barsuit_factor, room_filter={"KCST", "KGST", "PRE"})
+
+        # ---------- 3) Per-person plans (unchanged) based on internal BAR00 per-person ----------
+        def derive_pp_simple(plan: str, factor: float):
+            for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
                 add_row(
                     "EUR", rt, plan, d, next_d, ab, "",
                     _to_str_or_blank(_rnd(float(og) * factor)),
                     _to_str_or_blank(_rnd(float(tg) * factor)),
                     _to_str_or_blank(_rnd(float(eg) * factor)),
                 )
-            if pre_flat is not None and (room_filter is None or "PRE" in room_filter):
-                add_row("EUR", "PRE", plan, d, next_d, "", _to_str_or_blank(_rnd(float(pre_flat) * factor)), "", "", "")
 
-        derive_simple("BAREX", 1.25)
-        derive_simple("RACK", 1.35)
-        derive_simple("CORL25", 0.75)
-        derive_simple("OPQ", 0.80)
-        derive_simple("STAFF", 0.50)
-        derive_simple("WAL", 0.85)
+        # Keep these per-person
+        derive_pp_simple("OPQ", 0.80)
+        derive_pp_simple("STAFF", 0.50)
 
-        # BB = BAR00 + 35
-        for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
+        # BB per-person (+35)
+        for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
             add_row(
                 "EUR", rt, "BB", d, next_d, ab, "",
                 _to_str_or_blank(_rnd(float(og) + 35)),
@@ -407,9 +403,9 @@ def generate_pricing_rows(
                 _to_str_or_blank(_rnd(float(eg) + 35)),
             )
 
-        # WEL3 weekends-only (Fri/Sat nights)
+        # WEL3 weekends-only per-person (Fri/Sat nights)
         if d.weekday() in (4, 5):
-            for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
+            for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
                 add_row(
                     "EUR", rt, "WEL3", d, next_d, ab, "",
                     _to_str_or_blank(_rnd(float(og) * 1.35)),
@@ -417,9 +413,9 @@ def generate_pricing_rows(
                     _to_str_or_blank(_rnd(float(eg) * 1.35)),
                 )
 
-        # Ratio-based plans (HB/WEL/GRPBASE)
+        # Ratio-based per-person plans (HB/WEL/GRPBASE) remain per-person
         def apply_ratio_plan(plan: str, ratios: Dict[Tuple[str, str], Dict[str, float]]):
-            for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
+            for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
                 ratio = ratios.get((rt, ab))
                 if not ratio:
                     continue
@@ -434,23 +430,8 @@ def generate_pricing_rows(
         apply_ratio_plan("WEL", wel_ratios)
         apply_ratio_plan("GRPBASE", grp_ratios)
 
-        # GRPHIG = GRPBASE * 1.25
-        for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
-            ratio = grp_ratios.get((rt, ab))
-            if not ratio:
-                continue
-            g_og = _rnd(float(og) * ratio.get("OneGuest", 1.0))
-            g_tg = _rnd(float(tg) * ratio.get("TwoGuests", 1.0))
-            g_eg = _rnd(float(eg) * ratio.get("ExtraGuest", 1.0))
-            add_row(
-                "EUR", rt, "GRPHIG", d, next_d, ab, "",
-                _to_str_or_blank(_rnd(g_og * 1.25 if g_og is not None else None)),
-                _to_str_or_blank(_rnd(g_tg * 1.25 if g_tg is not None else None)),
-                _to_str_or_blank(_rnd(g_eg * 1.25 if g_eg is not None else None)),
-            )
-
-        # SUHB = HB * 1.25
-        for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
+        # SUHB per-person = HB * 1.25
+        for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
             ratio = hb_ratios.get((rt, ab))
             if not ratio:
                 continue
@@ -464,18 +445,17 @@ def generate_pricing_rows(
                 _to_str_or_blank(_rnd(h_eg * 1.25 if h_eg is not None else None)),
             )
 
-        # BARAPT / BARSUIT
-        barapt_factor = float(cfg["rate_plans"]["BARAPT_multiplier"])
-        derive_simple("BARAPT", barapt_factor, room_filter={"A1KB", "A2KB"})
-
-        barsuit_factor = float(cfg["rate_plans"]["BARSUIT_multiplier"])
-        derive_simple("BARSUIT", barsuit_factor, room_filter={"KCST", "KGST", "PRE"})
+        # ---------- 4) GRPHIG flat-only (derive from BAR00 flat) ----------
+        # Use template GRPBASE TwoGuests ratio if present for (rt,"A1"), else fallback 0.70
+        for rt, bar_flat in bar_flat_by_room.items():
+            r = grp_ratios.get((rt, "A1"), {})
+            grpbase_factor = float(r.get("TwoGuests", 0.70))
+            grphig_flat = _to_str_or_blank(_rnd(float(bar_flat) * grpbase_factor * 1.25))
+            add_row("EUR", rt, "GRPHIG", d, next_d, "", grphig_flat, "", "", "")
 
         d = next_d
 
-    # ✅ compress to bands to reduce output size
-    daily_df = pd.DataFrame(rows, columns=SCHEMA)
-    return compress_daily_rows_to_bands(daily_df)
+    return pd.DataFrame(rows, columns=SCHEMA)
 
 
 # --------------------------
@@ -563,7 +543,6 @@ def write_summary_txt(
     m["stay_date"] = pd.to_datetime(m["stay_date"]).dt.date
 
     w14 = m[(m["stay_date"] >= today) & (m["stay_date"] < d14)]
-    w30 = m[(m["stay_date"] >= today) & (m["stay_date"] < d30)]
 
     def top_days(df, n=5):
         if df.empty:
@@ -594,8 +573,7 @@ def write_summary_txt(
 
     if total_lines > 0:
         lines.append(
-            f"In total, {total_lines:,} rate points changed: {up:,} increases and {down:,} decreases "
-            f"(across BAR00 and all derived plans)."
+            f"In total, {total_lines:,} rate points changed: {up:,} increases and {down:,} decreases."
         )
     else:
         lines.append("No rate deltas were detected versus the baseline file in this run.")
@@ -637,7 +615,7 @@ def write_summary_txt(
 
     lines.append("")
     lines.append(
-        "Operationally, updates were kept within guardrails (floors/ceiling) to avoid overreacting to short-term noise. "
+        "Operationally, updates were kept within guardrails (floors/ceiling). "
         "If pickup accelerates or wash increases materially, the next run will adjust automatically."
     )
     lines.append("")
