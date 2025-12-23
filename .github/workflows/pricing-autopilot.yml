@@ -1,0 +1,40 @@
+name: Pricing Autopilot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 2 * * *"  # daily at 02:15 UTC (adjust if you want local)
+
+jobs:
+  run-pricing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyyaml
+
+      - name: Run pricing script
+        run: |
+          python src/run_pricing.py --config src/config.yml
+
+      - name: Commit & push results
+        run: |
+          git config user.name "pricing-autopilot"
+          git config user.email "pricing-autopilot@users.noreply.github.com"
+          git add data/RatePricing.csv data/RatePricing_changes.csv
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Autopilot: update RatePricing"
+          git push
