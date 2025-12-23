@@ -11,9 +11,7 @@ import yaml
 
 
 def repo_root() -> str:
-    """
-    Resolve repo root assuming this file is /src/run_pricing.py.
-    """
+    """Resolve repo root assuming this file is /src/run_pricing.py."""
     here = os.path.abspath(os.path.dirname(__file__))
     return os.path.abspath(os.path.join(here, ".."))
 
@@ -46,16 +44,7 @@ def main() -> int:
     cfg = load_yaml(cfg_path)
 
     as_of = dt.date.fromisoformat(args.as_of) if args.as_of else dt.date.today()
-    horizon_days = int(cfg.get("pricing_horizon_days", 90))
-    start_date = as_of
-    end_date = as_of + dt.timedelta(days=horizon_days)
-
-    # Optional: don't generate beyond max OTB date (keeps output tight)
-    if not daily.empty:
-        max_otb_date = daily["stay_date"].max()
-        if isinstance(max_otb_date, dt.date):
-            end_date = min(end_date, max_otb_date + dt.timedelta(days=1))  # +1 so that last date is included as a start
-
+    horizon_days = int(cfg.get("pricing_horizon_days", 365))
 
     # Resolve paths from config (matches your /data layout)
     otb_path = rpath(repo, cfg["otb"]["file"])
@@ -94,6 +83,16 @@ def main() -> int:
     print("[INFO] Building daily metrics...")
     daily = build_daily_metrics(otb_df, cfg, as_of=as_of)
 
+    # Horizon window (rolling)
+    start_date = as_of
+    end_date = as_of + dt.timedelta(days=horizon_days)
+
+    # Optional: don’t generate beyond the max stay date present in OTB (keeps output tighter)
+    if not daily.empty:
+        max_otb_date = daily["stay_date"].max()
+        if isinstance(max_otb_date, dt.date):
+            end_date = min(end_date, max_otb_date + dt.timedelta(days=1))
+
     print("[INFO] Building event multipliers...")
     event_mult = build_event_multiplier_series(events, start_date=start_date, end_date=end_date, cfg=cfg)
 
@@ -112,7 +111,6 @@ def main() -> int:
         end_date=end_date,
     )
 
-    # Overwrite output file with: template + new rows
     print("[INFO] Writing pricing output (overwrite)...")
     write_pricing_csv(
         baseline_csv_path=template_path,
@@ -129,7 +127,6 @@ def main() -> int:
         as_of=as_of,
     )
 
-    # ✅ Write GM-friendly narrative summary to the same folder as RatePricing.csv
     summary_path = os.path.join(os.path.dirname(out_pricing_path), "RatePricing_Summary.txt")
     print("[INFO] Writing GM summary...")
     write_summary_txt(
