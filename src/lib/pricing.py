@@ -10,7 +10,8 @@ Responsibilities:
   BARAPT (A1KB/A2KB only), BARSUIT (KCST/KGST/PRE only, PRE flat-only)
 - Write:
   - pricing output CSV (overwrite existing file path, keeping header)
-  - changes CSV showing old vs new + reasons
+  - changes CSV showing old vs new + reasons (field-level)
+  - summary TXT written like a revenue manager for the GM
 
 Notes:
 - EndDate is exclusive.
@@ -55,10 +56,6 @@ def _is_weekend(d: dt.date) -> bool:
     return d.weekday() >= 5  # Sat/Sun
 
 
-def _parse_date(s: str) -> dt.date:
-    return dt.date.fromisoformat(s)
-
-
 def _safe_float(v) -> Optional[float]:
     if v is None:
         return None
@@ -70,8 +67,14 @@ def _safe_float(v) -> Optional[float]:
         t = v.strip()
         if t == "":
             return None
-        return float(t)
-    return float(v)
+        try:
+            return float(t)
+        except ValueError:
+            return None
+    try:
+        return float(v)
+    except Exception:
+        return None
 
 
 def _to_str_or_blank(v: Optional[int]) -> str:
@@ -89,7 +92,7 @@ def _clamp(x: float, lo: float, hi: float) -> float:
 def load_pricing_template(path: str) -> pd.DataFrame:
     """
     Load template pricing CSV and normalize types.
-    Keeps blanks as empty strings in numeric fields where needed later.
+    Keeps blanks as empty strings in numeric fields.
     """
     df = pd.read_csv(path, dtype=str).fillna("")
     missing = [c for c in SCHEMA if c not in df.columns]
@@ -114,7 +117,6 @@ def _latest_by_key(df: pd.DataFrame, rateplan: str) -> pd.DataFrame:
     if sub.empty:
         return sub
     sub = sub.sort_values(["StartDate", "EndDate"])
-    # group key includes AgeBucketCode (blank allowed)
     idx = sub.groupby(["RoomTypeCode", "AgeBucketCode"], dropna=False).tail(1).index
     return sub.loc[idx].copy()
 
@@ -156,14 +158,14 @@ def compute_multipliers(
     """
     Combine:
       - occupancy thresholds
-      - pickup adjustment (v1: disabled unless we add snapshots later; kept for extension)
-      - wash adjustment (v1: small reduction if unusually high; optional)
+      - pickup adjustment (v1: 1.0 placeholder unless you add snapshots later)
+      - wash adjustment (small reduction if unusually high)
       - groups displacement
       - event multipliers
-      - guardrails (caps only here; per-run change caps are applied when we have baseline published rates)
+      - floors/ceiling guardrails
 
     Returns DataFrame with:
-      stay_date, final_multiplier, reason, event_name
+      stay_date, final_multiplier, reason, event_name, event_multiplier
     """
     df = daily_metrics_df.copy()
 
@@ -175,33 +177,30 @@ def compute_multipliers(
 
     # Base multiplier from occupancy thresholds
     thresholds = cfg["occupancy_thresholds"]
+
     def base_from_occ(occ: float) -> float:
         for t in thresholds:
             if float(t["min"]) <= occ < float(t["max"]):
                 return float(t["multiplier"])
-        # If >=1.0, treat as top bucket
         return float(thresholds[-1]["multiplier"])
 
     df["base_occ_multiplier"] = df["forecast_occupancy"].apply(base_from_occ)
 
-    # Pickup adjustment placeholder (v1: 1.0 always unless you add snapshot logic)
+    # Pickup adjustment placeholder (v1: always 1.0)
     df["pickup_multiplier"] = 1.0
 
-    # Wash multiplier: small reduction only if wash is high (v1: optional simple rule)
-    # If expected wash / net_otb > 0.12 => 0.97 else 1.00
+    # Wash multiplier: reduce slightly if wash is high (>12%)
     def wash_mult(row) -> float:
         net_otb = float(row.get("net_otb", 0.0))
         expected_wash = float(row.get("expected_wash", 0.0))
         if net_otb <= 0:
             return 1.0
         wash_rate = expected_wash / net_otb
-        if wash_rate > 0.12:
-            return 0.97
-        return 1.0
+        return 0.97 if wash_rate > 0.12 else 1.00
 
     df["wash_multiplier"] = df.apply(wash_mult, axis=1)
 
-    # Groups displacement
+    # Groups displacement (works even if group_rooms is 0)
     gcfg = cfg["groups"]
     thresh = float(gcfg["displacement_threshold"])
     uplift_low = float(gcfg["uplift_low"])
@@ -230,27 +229,28 @@ def compute_multipliers(
         * df["event_multiplier"]
     )
 
-    # Floors/ceilings (simple seasonal floor; event floor handled downstream with event_name)
+    # Floors / ceiling
     guard = cfg["guardrails"]
     ceiling = float(guard["ceiling"])
+    low_floor = float(guard["floors"]["low_season"])
 
     def floor_for_date(d: dt.date) -> float:
         # Summer floor (Jul–Aug)
         if d.month in (7, 8):
             return float(guard["floors"]["summer"])
-        # Low season floor (mid-Jan and late Nov approximations)
+        # Low season floor (mid-Jan, late Nov approximations)
         if (d.month == 1 and d.day >= 7) or (d.month == 11 and d.day >= 10):
             return float(guard["floors"]["low_season"])
-        return float(guard["floors"]["low_season"])  # default safe floor; tightened below
-    # Use a general minimum floor of low_season to avoid 0.
+        return low_floor
+
     df["floor"] = df["stay_date"].apply(floor_for_date)
 
-    # Compression events floor (if event is Peak, enforce compression_event floor)
+    # Compression event floor if peak weight hit
     compression_floor = float(guard["floors"]["compression_event"])
-    # Determine if event level implies compression: we don't store demand_level in df; if multiplier >= Peak weight, treat as compression
     peak_weight = float(cfg["events"]["weights"].get("Peak", 1.20))
     df["floor"] = df.apply(
-        lambda r: max(float(r["floor"]), compression_floor) if float(r["event_multiplier"]) >= peak_weight else float(r["floor"]),
+        lambda r: max(float(r["floor"]), compression_floor)
+        if float(r["event_multiplier"]) >= peak_weight else float(r["floor"]),
         axis=1,
     )
 
@@ -259,11 +259,9 @@ def compute_multipliers(
         axis=1,
     )
 
-    # Reason string (compact, used in change log)
+    # Reason string (used for summary)
     def reason(row) -> str:
-        parts = [
-            f"occ={row['forecast_occupancy']:.2f}->{row['base_occ_multiplier']:.2f}",
-        ]
+        parts = [f"occ={row['forecast_occupancy']:.2f}->{row['base_occ_multiplier']:.2f}"]
         if float(row["event_multiplier"]) > 1.0:
             parts.append(f"event={row['event_multiplier']:.2f}:{row['event_name']}")
         if float(row["group_multiplier"]) > 1.0:
@@ -290,11 +288,9 @@ def generate_pricing_rows(
 ) -> pd.DataFrame:
     """
     Generate pricing rows for each day in [start_date, end_date) as 1-night bands.
-    (Daily rows keep it simple and avoids complex band splitting; you can optimize later.)
 
     We use template's latest BAR00 as baseline and ratios for HB/WEL/GRPBASE.
     """
-    # Get latest baseline rows
     bar_latest = _latest_by_key(template_df, "BAR00")
     if bar_latest.empty:
         raise ValueError("Template has no BAR00 rows; cannot build any pricing.")
@@ -307,8 +303,7 @@ def generate_pricing_rows(
     wel_ratios = _compute_ratio_dict(wel_latest, bar_latest) if not wel_latest.empty else {}
     grp_ratios = _compute_ratio_dict(grp_latest, bar_latest) if not grp_latest.empty else {}
 
-    # Build baseline BAR00 dict
-    # Key is (RoomTypeCode, AgeBucketCode)
+    # Baseline BAR00 dict: key (RoomTypeCode, AgeBucketCode)
     baseline: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
     for _, r in bar_latest.iterrows():
         key = (r["RoomTypeCode"], r["AgeBucketCode"])
@@ -319,8 +314,10 @@ def generate_pricing_rows(
             "ExtraGuest": _safe_float(r["ExtraGuest"]),
         }
 
-    # Multipliers keyed by date
-    mult_map = {row["stay_date"]: (float(row["final_multiplier"]), str(row["reason"])) for _, row in multipliers_df.iterrows()}
+    mult_map = {
+        row["stay_date"]: (float(row["final_multiplier"]), str(row["reason"]))
+        for _, row in multipliers_df.iterrows()
+    }
 
     rows: List[Dict[str, str]] = []
 
@@ -338,21 +335,19 @@ def generate_pricing_rows(
             "ExtraGuest": eg,
         })
 
-    # Iterate each date as 1-night period
     d = start_date
     while d < end_date:
         mult, _reason = mult_map.get(d, (1.0, ""))
         next_d = d + dt.timedelta(days=1)
 
-        # Build BAR00 per key
-        bar_rows_per_key: Dict[Tuple[str, str], Tuple[str, str, str]] = {}  # (rt,ab)->(og,tg,eg) str
+        # BAR00 per key
+        bar_rows_per_key: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
         pre_flat: Optional[str] = None
 
         for (rt, ab), base_vals in baseline.items():
             currency = "EUR"
 
             if rt == "PRE" and ab == "":
-                # Flat-only handling
                 base_flat = base_vals.get("Flat")
                 if base_flat is None:
                     continue
@@ -362,7 +357,6 @@ def generate_pricing_rows(
                 continue
 
             if ab == "":
-                # Non-PRE rows should be per-person (skip if no age bucket)
                 continue
 
             base_og = base_vals.get("OneGuest")
@@ -383,14 +377,14 @@ def generate_pricing_rows(
             for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
                 if room_filter and rt not in room_filter:
                     continue
-                add_row("EUR", rt, plan, d, next_d, ab, "", _to_str_or_blank(_rnd(float(og) * factor)),
-                        _to_str_or_blank(_rnd(float(tg) * factor)), _to_str_or_blank(_rnd(float(eg) * factor)))
-
-            # PRE flat if present and plan should apply to PRE
+                add_row(
+                    "EUR", rt, plan, d, next_d, ab, "",
+                    _to_str_or_blank(_rnd(float(og) * factor)),
+                    _to_str_or_blank(_rnd(float(tg) * factor)),
+                    _to_str_or_blank(_rnd(float(eg) * factor)),
+                )
             if pre_flat is not None and (room_filter is None or "PRE" in room_filter):
                 add_row("EUR", "PRE", plan, d, next_d, "", _to_str_or_blank(_rnd(float(pre_flat) * factor)), "", "", "")
-
-        # Excluded plans are not generated here by design
 
         derive_simple("BAREX", 1.25)
         derive_simple("RACK", 1.35)
@@ -399,20 +393,24 @@ def generate_pricing_rows(
         derive_simple("STAFF", 0.50)
         derive_simple("WAL", 0.85)
 
-        # BB = BAR00 + 35 per person (A1 and C1 rows)
+        # BB = BAR00 + 35 per person
         for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
-            add_row("EUR", rt, "BB", d, next_d, ab, "",
-                    _to_str_or_blank(_rnd(float(og) + 35)),
-                    _to_str_or_blank(_rnd(float(tg) + 35)),
-                    _to_str_or_blank(_rnd(float(eg) + 35)))
+            add_row(
+                "EUR", rt, "BB", d, next_d, ab, "",
+                _to_str_or_blank(_rnd(float(og) + 35)),
+                _to_str_or_blank(_rnd(float(tg) + 35)),
+                _to_str_or_blank(_rnd(float(eg) + 35)),
+            )
 
-        # WEL3 weekends-only: Fri and Sat nights (stay_date Fri or Sat)
+        # WEL3 weekends-only (Fri and Sat nights)
         if d.weekday() in (4, 5):  # Fri, Sat
             for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
-                add_row("EUR", rt, "WEL3", d, next_d, ab, "",
-                        _to_str_or_blank(_rnd(float(og) * 1.35)),
-                        _to_str_or_blank(_rnd(float(tg) * 1.35)),
-                        _to_str_or_blank(_rnd(float(eg) * 1.35)))
+                add_row(
+                    "EUR", rt, "WEL3", d, next_d, ab, "",
+                    _to_str_or_blank(_rnd(float(og) * 1.35)),
+                    _to_str_or_blank(_rnd(float(tg) * 1.35)),
+                    _to_str_or_blank(_rnd(float(eg) * 1.35)),
+                )
 
         # Plans that preserve template structure via ratios vs BAR00
         def apply_ratio_plan(plan: str, ratios: Dict[Tuple[str, str], Dict[str, float]]):
@@ -420,17 +418,18 @@ def generate_pricing_rows(
                 ratio = ratios.get((rt, ab))
                 if not ratio:
                     continue
-                add_row("EUR", rt, plan, d, next_d, ab, "",
-                        _to_str_or_blank(_rnd(float(og) * ratio.get("OneGuest", 1.0))),
-                        _to_str_or_blank(_rnd(float(tg) * ratio.get("TwoGuests", 1.0))),
-                        _to_str_or_blank(_rnd(float(eg) * ratio.get("ExtraGuest", 1.0))))
-            # PRE is not generated for these unless template had it per-person (we keep PRE flat-only)
+                add_row(
+                    "EUR", rt, plan, d, next_d, ab, "",
+                    _to_str_or_blank(_rnd(float(og) * ratio.get("OneGuest", 1.0))),
+                    _to_str_or_blank(_rnd(float(tg) * ratio.get("TwoGuests", 1.0))),
+                    _to_str_or_blank(_rnd(float(eg) * ratio.get("ExtraGuest", 1.0))),
+                )
+
         apply_ratio_plan("HB", hb_ratios)
         apply_ratio_plan("WEL", wel_ratios)
         apply_ratio_plan("GRPBASE", grp_ratios)
 
         # GRPHIG = GRPBASE * 1.25
-        # We need GRPBASE rows just generated; easiest is to derive again from BAR00 using ratio then multiply.
         for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
             ratio = grp_ratios.get((rt, ab))
             if not ratio:
@@ -438,12 +437,14 @@ def generate_pricing_rows(
             g_og = _rnd(float(og) * ratio.get("OneGuest", 1.0))
             g_tg = _rnd(float(tg) * ratio.get("TwoGuests", 1.0))
             g_eg = _rnd(float(eg) * ratio.get("ExtraGuest", 1.0))
-            add_row("EUR", rt, "GRPHIG", d, next_d, ab, "",
-                    _to_str_or_blank(_rnd(g_og * 1.25 if g_og is not None else None)),
-                    _to_str_or_blank(_rnd(g_tg * 1.25 if g_tg is not None else None)),
-                    _to_str_or_blank(_rnd(g_eg * 1.25 if g_eg is not None else None)))
+            add_row(
+                "EUR", rt, "GRPHIG", d, next_d, ab, "",
+                _to_str_or_blank(_rnd((g_og or 0) * 1.25) if g_og is not None else None),
+                _to_str_or_blank(_rnd((g_tg or 0) * 1.25) if g_tg is not None else None),
+                _to_str_or_blank(_rnd((g_eg or 0) * 1.25) if g_eg is not None else None),
+            )
 
-        # SUHB = HB * 1.25 (using HB ratios then x1.25)
+        # SUHB = HB * 1.25
         for (rt, ab), (og, tg, eg) in bar_rows_per_key.items():
             ratio = hb_ratios.get((rt, ab))
             if not ratio:
@@ -451,10 +452,12 @@ def generate_pricing_rows(
             h_og = _rnd(float(og) * ratio.get("OneGuest", 1.0))
             h_tg = _rnd(float(tg) * ratio.get("TwoGuests", 1.0))
             h_eg = _rnd(float(eg) * ratio.get("ExtraGuest", 1.0))
-            add_row("EUR", rt, "SUHB", d, next_d, ab, "",
-                    _to_str_or_blank(_rnd(h_og * 1.25 if h_og is not None else None)),
-                    _to_str_or_blank(_rnd(h_tg * 1.25 if h_tg is not None else None)),
-                    _to_str_or_blank(_rnd(h_eg * 1.25 if h_eg is not None else None)))
+            add_row(
+                "EUR", rt, "SUHB", d, next_d, ab, "",
+                _to_str_or_blank(_rnd((h_og or 0) * 1.25) if h_og is not None else None),
+                _to_str_or_blank(_rnd((h_tg or 0) * 1.25) if h_tg is not None else None),
+                _to_str_or_blank(_rnd((h_eg or 0) * 1.25) if h_eg is not None else None),
+            )
 
         # BARAPT = BAR00 * 1.40 (A1KB/A2KB only)
         barapt_factor = float(cfg["rate_plans"]["BARAPT_multiplier"])
@@ -479,18 +482,12 @@ def write_pricing_csv(
     output_csv_path: str,
 ) -> None:
     """
-    Overwrite the output pricing file with:
-      - header
+    Overwrite output pricing file with:
       - baseline rows (unchanged)
       - appended rows
-
-    This matches your "do not touch existing rows; append only" rule in the workflow,
-    but since you asked to overwrite the file content with same name/path, we write a fresh file containing:
-      baseline + appended
     """
     base = pd.read_csv(baseline_csv_path, dtype=str).fillna("")
     base = base[SCHEMA].copy()
-
     out = pd.concat([base, appended_rows_df], ignore_index=True)
     out.to_csv(output_csv_path, index=False, quoting=csv.QUOTE_MINIMAL)
 
@@ -503,18 +500,13 @@ def write_changes_csv(
     as_of: dt.date,
 ) -> None:
     """
-    Create a compact changes file.
-    We compare baseline vs appended for the overlapping keys:
+    Field-level changes vs baseline for overlapping keys:
       (RoomTypeCode, RatePlanCode, StartDate, EndDate, AgeBucketCode)
-
-    For each numeric field, we report old/new/delta/deltaPct plus a simple reason placeholder.
     """
     base = pd.read_csv(baseline_csv_path, dtype=str).fillna("")
     base = base[SCHEMA].copy()
 
-    # Key
     key_cols = ["RoomTypeCode", "RatePlanCode", "StartDate", "EndDate", "AgeBucketCode"]
-
     base_k = base.set_index(key_cols)
     new_k = appended_rows_df.set_index(key_cols)
 
@@ -546,17 +538,132 @@ def write_changes_csv(
                 "New": "" if new_v is None else int(new_v),
                 "Delta": "" if delta is None else int(delta),
                 "DeltaPct": "" if delta_pct is None else round(delta_pct, 4),
-                "Reason": "",  # filled later if you pass reasons through the pipeline
             })
 
     pd.DataFrame(rows).to_csv(changes_csv_path, index=False)
 
 
-# Optional helper if you want strict 10-column output formatting later
+def write_summary_txt(
+    multipliers_df: pd.DataFrame,
+    changes_csv_path: str,
+    summary_txt_path: str,
+    as_of: dt.date,
+) -> None:
+    """
+    Write a conversational summary (GM-friendly) of what changed and why.
+
+    Uses:
+      - multipliers_df (stay_date, final_multiplier, reason, event_name, event_multiplier)
+      - RatePricing_changes.csv to quantify magnitude/direction
+    """
+    try:
+        ch = pd.read_csv(changes_csv_path)
+    except Exception:
+        ch = pd.DataFrame()
+
+    total_lines = int(len(ch)) if not ch.empty else 0
+    up = int((ch["Delta"] > 0).sum()) if (not ch.empty and "Delta" in ch.columns) else 0
+    down = int((ch["Delta"] < 0).sum()) if (not ch.empty and "Delta" in ch.columns) else 0
+
+    today = as_of
+    d7 = today + dt.timedelta(days=7)
+    d14 = today + dt.timedelta(days=14)
+    d30 = today + dt.timedelta(days=30)
+
+    m = multipliers_df.copy()
+    m["stay_date"] = pd.to_datetime(m["stay_date"]).dt.date
+
+    def window(df, a, b):
+        return df[(df["stay_date"] >= a) & (df["stay_date"] < b)]
+
+    w14 = window(m, today, d14)
+    w30 = window(m, today, d30)
+
+    def top_days(df, n=5):
+        if df.empty:
+            return []
+        tmp = df.sort_values("final_multiplier", ascending=False).head(n)
+        return [(r["stay_date"], float(r["final_multiplier"]), str(r.get("event_name", ""))) for _, r in tmp.iterrows()]
+
+    def low_days(df, n=5):
+        if df.empty:
+            return []
+        tmp = df.sort_values("final_multiplier", ascending=True).head(n)
+        return [(r["stay_date"], float(r["final_multiplier"]), str(r.get("event_name", ""))) for _, r in tmp.iterrows()]
+
+    peaks_14 = top_days(w14, 5)
+    lows_14 = low_days(w14, 5)
+
+    # Event callouts (next 30 days)
+    event_days = m[m.get("event_multiplier", 1.0) > 1.0].copy()
+    event_days = event_days.sort_values("stay_date")
+    next_events = event_days[event_days["stay_date"] < d30].head(12)
+
+    lines = []
+    lines.append(f"Revenue Manager Summary — {today.isoformat()}")
+    lines.append("")
+    lines.append(
+        "I updated rates based on current on-the-books occupancy (net of expected cancellations/no-shows), "
+        "plus event-related compression and group displacement where applicable."
+    )
+    lines.append("")
+
+    if total_lines > 0:
+        lines.append(
+            f"In total, {total_lines:,} rate points changed: {up:,} increases and {down:,} decreases "
+            f"(across BAR00 and all derived plans)."
+        )
+    else:
+        lines.append("No rate deltas were detected versus the baseline file in this run.")
+
+    if not w14.empty:
+        avg_mult_14 = float(w14["final_multiplier"].mean())
+        lines.append("")
+        lines.append(
+            f"Over the next 14 days, the average pricing multiplier is {avg_mult_14:.2f}. "
+            "Rates were raised on higher-occupancy / higher-demand dates to protect ADR, and softened on lower-occupancy "
+            "dates to stimulate pickup."
+        )
+
+    if peaks_14:
+        lines.append("")
+        lines.append("Highest-pressure dates (next 14 days):")
+        for d, mult, evn in peaks_14:
+            label = f"{d.isoformat()} (x{mult:.2f})"
+            if evn:
+                label += f" — event impact: {evn}"
+            lines.append(f" - {label}")
+
+    if lows_14:
+        lines.append("")
+        lines.append("Softest-demand dates (next 14 days):")
+        for d, mult, _evn in lows_14:
+            lines.append(f" - {d.isoformat()} (x{mult:.2f})")
+
+    if not next_events.empty:
+        lines.append("")
+        lines.append("Event-related compression in the next 30 days:")
+        for _, r in next_events.iterrows():
+            ev = str(r.get("event_name", "")).strip()
+            if not ev:
+                continue
+            lines.append(
+                f" - {r['stay_date'].isoformat()}: {ev} (event multiplier x{float(r.get('event_multiplier', 1.0)):.2f})"
+            )
+
+    lines.append("")
+    lines.append(
+        "Operationally, updates were kept within guardrails (floors/ceiling) to avoid overreacting to short-term noise. "
+        "If pickup accelerates or wash increases materially, the next run will adjust automatically."
+    )
+    lines.append("")
+
+    with open(summary_txt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+
+# Optional: strict writer if you ever need hard 10-column output formatting.
 def write_csv_strict_10cols(path: str, df: pd.DataFrame) -> None:
-    """
-    Write CSV ensuring exactly 10 columns and preserving blanks.
-    """
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(SCHEMA)
