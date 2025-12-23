@@ -84,6 +84,57 @@ def _to_str_or_blank(v: Optional[int]) -> str:
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
+def compress_daily_rows_to_bands(daily_rows_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compress 1-night rows into longer bands when the output values are identical.
+    Safe: only merges when Flat/OneGuest/TwoGuests/ExtraGuest match exactly.
+    """
+    df = daily_rows_df.copy()
+    # Parse dates so we can merge reliably
+    df["StartDate"] = pd.to_datetime(df["StartDate"]).dt.date
+    df["EndDate"] = pd.to_datetime(df["EndDate"]).dt.date
+
+    id_cols = [
+        "Currency", "RoomTypeCode", "RatePlanCode", "AgeBucketCode",
+        "Flat", "OneGuest", "TwoGuests", "ExtraGuest",
+    ]
+
+    # Sort for deterministic merging
+    df = df.sort_values(id_cols + ["StartDate", "EndDate"]).reset_index(drop=True)
+
+    out_rows = []
+    for _, g in df.groupby(id_cols, dropna=False, sort=False):
+        g = g.sort_values("StartDate").reset_index(drop=True)
+
+        cur_start = g.loc[0, "StartDate"]
+        cur_end = g.loc[0, "EndDate"]
+
+        for i in range(1, len(g)):
+            s = g.loc[i, "StartDate"]
+            e = g.loc[i, "EndDate"]
+
+            # consecutive?
+            if s == cur_end:
+                cur_end = e
+            else:
+                # flush band
+                row = g.loc[0, :].to_dict()
+                row["StartDate"] = cur_start.isoformat()
+                row["EndDate"] = cur_end.isoformat()
+                out_rows.append(row)
+
+                # start new band
+                cur_start = s
+                cur_end = e
+
+        # flush last band
+        row = g.loc[0, :].to_dict()
+        row["StartDate"] = cur_start.isoformat()
+        row["EndDate"] = cur_end.isoformat()
+        out_rows.append(row)
+
+    return pd.DataFrame(out_rows, columns=SCHEMA)
+
 
 # --------------------------
 # Template loading
