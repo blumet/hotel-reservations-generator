@@ -3,7 +3,10 @@ name: Pricing Autopilot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "15 2 * * *"  # daily at 02:15 UTC (adjust if you want local)
+    - cron: "15 2 * * *"  # daily 02:15 UTC (adjust if you want)
+
+permissions:
+  contents: write   # REQUIRED to commit/push back to repo
 
 jobs:
   run-pricing:
@@ -27,14 +30,28 @@ jobs:
         run: |
           python src/run_pricing.py --config src/config.yml
 
+      # ✅ This is what gives you a Download button in GitHub Actions
+      - name: Upload pricing outputs (downloadable)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pricing-output
+          path: |
+            data/RatePricing.csv
+            data/RatePricing_changes.csv
+          if-no-files-found: error
+
+      # Optional: also commit and push the new files into the repo
       - name: Commit & push results
         run: |
           git config user.name "pricing-autopilot"
           git config user.email "pricing-autopilot@users.noreply.github.com"
+
           git add data/RatePricing.csv data/RatePricing_changes.csv
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
           fi
+
           git commit -m "Autopilot: update RatePricing"
           git push
