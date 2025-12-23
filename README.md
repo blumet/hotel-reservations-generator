@@ -1,83 +1,260 @@
-# Revenue Autopilot (Barcelona) — Occupancy-Based Pricing
+# Revenue Management Pricing Engine – README
 
-This repo contains a small revenue management automation that updates hotel pricing based on:
-- Occupancy forecast from `BusinessOnTheBooks.csv`
-- Pickup trend (bookings moving up/down)
-- Expected wash (cancellations + no-shows)
-- Group displacement (group blocks pushing compression)
-- Barcelona event calendar (congresses/festivals/holidays)
+## Purpose
 
-It runs on GitHub Actions and overwrites the existing pricing output file in-place.
+This document defines the **commercial logic, pricing rules, and extension guidelines** for the pricing engine that generates PMS-ready rate tables.
 
-## Files
+It is the **single source of truth** for how prices are calculated. Any future changes (new rate plans, room types, packages, or logic tweaks) must follow the rules defined here.
 
-### Inputs
-- `BusinessOnTheBooks.csv`
-  - On-the-books (OTB) data used to forecast occupancy and pickup.
-- `events.yaml` (or `events.json`)
-  - Editable calendar of major demand events (MWC, ISE, festivals, holidays).
-- `RatePricing-Template.csv`
-  - Pricing template used as source-of-truth to preserve structure and derive plans.
+---
 
-### Outputs
-- `RatePricing.csv`
-  - The main pricing output file. **This workflow overwrites this file using the same name/path.**
-- `RatePricing_changes.csv`
-  - Human-readable summary of how rates changed (old/new/delta/reasons).
+## 1. Core Principles
 
-## Pricing Logic (High Level)
+1. **BAR00 is the main demand signal**
 
-For each stay date (and optionally room type):
-1. Compute effective occupancy:
-   - NetOTB = RoomsSold + GroupRooms
-   - ExpectedWash = NetOTB * (CancelRate + NoShowRate)
-   - EffectiveOTB = NetOTB - ExpectedWash
-   - ForecastOcc = EffectiveOTB / Capacity
+   * It reacts the most to occupancy, events, and weekends.
+   * All other public rates are derived from BAR00.
 
-2. Compute multipliers:
-   - BaseOccMultiplier: derived from ForecastOcc thresholds
-   - PickupMultiplier: adjusts based on recent pickup trend
-   - WashMultiplier: small reduction when wash is unusually high
-   - GroupMultiplier: increases transient pricing when groups compress inventory
-   - EventMultiplier: increases pricing around major events + shoulders
+2. **Packages follow demand, but do not lead it**
 
-3. Guardrails:
-   - Max change per run (default ±8%)
-   - Seasonal floors (e.g., summer not below 0.95)
-   - Compression event lock (MWC/ISE never discounted below 1.10)
+   * Packages are calmer than BAR00.
+   * They use tiered premiums instead of continuous oscillation.
 
-4. Pricing output:
-   - Generate BAR00 for the target dates using the final multiplier.
-   - Derive additional plans:
-     - BAREX = BAR00 * 1.25
-     - RACK = BAR00 * 1.35
-     - CORL25 = BAR00 * 0.75
-     - OPQ = BAR00 * 0.80
-     - GRPBASE = BAR00 * 0.70
-     - GRPHIG = GRPBASE * 1.25
-     - STAFF = BAR00 * 0.50
-     - WAL = BAR00 * 0.85
-     - HB / WEL preserve template structure (ratios vs BAR00)
-     - SUHB = HB * 1.25
-     - BB = BAR00 + 35 per person
-     - WEL3 = weekends-only, BAR00 * 1.35
-     - BARAPT = BAR00 * 1.40 (A2KB/A1KB only)
-     - BARSUIT = BAR00 * 1.25 (KCST/KGST/PRE only; PRE flat-only)
+3. **Negotiated / staff rates are non-dynamic**
 
-## Configuration
-- `config.yml` controls:
-  - Column mapping for `BusinessOnTheBooks.csv`
-  - Thresholds and guardrails
-  - Default cancel/no-show rates (if not provided in OTB)
-  - Event weights (Peak/High/Medium)
+   * They do NOT change with occupancy, weekends, or events.
 
-## GitHub Actions
-A scheduled workflow runs periodically:
-- Reads inputs
-- Generates new `RatePricing.csv`
-- Writes `RatePricing_changes.csv`
-- Commits and pushes updates
+4. **Date bands are allowed**
 
-## Safety Notes
-This is a rules-based RM autopilot designed to be practical and revenue-positive quickly.
-For high-stakes use, validate outputs for 2 weeks before increasing aggressiveness.
+   * A new band is created only when the final price changes.
+
+5. **All prices are rounded to whole EUR**
+
+---
+
+## 2. Occupancy & Demand Inputs
+
+### Occupancy Source
+
+* Hotel-wide occupancy derived from `BusinessOnTheBooks`
+
+### Effective Occupancy (optional)
+
+If your OTB file provides components like pickup, wash (cancellations/no-shows), or group rooms, you **may** compute an **effective occupancy** before pricing:
+
+* NetOTB = RoomsSold + GroupRooms
+* ExpectedWash = NetOTB × (CancelRate + NoShowRate)
+* EffectiveOTB = NetOTB − ExpectedWash
+* ForecastOcc = EffectiveOTB / Capacity
+
+**If any of these inputs are missing or unclear, do not invent multipliers.** In that case, use the simplest hotel-wide occupancy available in `BusinessOnTheBooks`.
+
+### High Demand Definition (GLOBAL)
+
+High demand applies when:
+
+* **Occupancy ≥ 75%**, OR
+* **High event day** (from `event.py`)
+
+This trigger is used consistently across all rate plans.
+
+---
+
+## 3. BAR00 Pricing Logic (Base Rate)
+
+### Low Occupancy Bands (KGDX reference)
+
+| Occupancy | BAR00 (KGDX) |
+| --------- | ------------ |
+| ≤30%      | 489          |
+| 31–50%    | 520          |
+| 51–65%    | 560          |
+
+### High Occupancy Ramp (66–99%)
+
+BAR00 becomes continuous and more elastic:
+
+```
+KGDX_BAR00 = round(610 + (occ - 66) * 179 / 33)
+```
+
+* 66% → 610
+* 99% → 789 (ceiling for KGDX)
+
+### Weekend Effect
+
+* **Friday & Saturday**
+* Standard rooms: **+12%**
+* Club rooms: **+15%**
+
+### Event Effect
+
+* Applied using factors from `event.py`
+* Club rooms react more strongly than standard rooms
+
+---
+
+## 4. Room Type Pricing
+
+All room prices are derived from **KGDX BAR00**, except PRE.
+
+### Room Premiums (vs KGDX)
+
+| Room Type | Premium          |
+| --------- | ---------------- |
+| KGDX      | +0               |
+| KGSP      | +75              |
+| TWSP      | +89              |
+| TWDX      | +120             |
+| KINGR     | +189             |
+| KCDX      | +250             |
+| TCDX      | +250             |
+| KGST      | +350             |
+| A1KB      | +450             |
+| PRE       | **21,000 fixed** |
+
+### Club Rooms (KCDX / TCDX)
+
+* Use a **steeper occupancy ramp** between 66–99%
+
+```
+ClubRamp = round(610 + (occ - 66) * 279 / 33)
+Final = ClubRamp + 250
+```
+
+* Club rooms also use **stronger weekend & event effects**
+
+---
+
+## 5. Per-Person Pricing Rules
+
+### Per-Person Room Types
+
+* **A1KB**
+* **KGST**
+
+All other room types are flat-priced.
+
+### Adult (A1) Ratios
+
+* OneGuest: `0.703 × base`
+* TwoGuest: `0.844 × base`
+* ExtraGuest: `0.334 × base`
+
+### Child (C1) Ratios
+
+* OneGuest: `0.070 × base`
+* TwoGuest: `0.097 × base`
+* ExtraGuest: `0.105 × base`
+
+---
+
+## 6. Rate Plan Classification
+
+### A. Fully Dynamic (Follow BAR00 exactly)
+
+These plans react fully to occupancy, weekends, and events:
+
+* **BAR00**
+* **RACK** (markup on BAR00)
+* **BARAPT**
+* **BARSUIT**
+
+### B. Follower Packages (Tiered, Calm)
+
+These follow BAR00 but only switch between **low / high tiers**:
+
+| Plan | Low Tier | High Tier | Notes           |
+| ---- | -------: | --------: | --------------- |
+| BB   |      +18 |       +25 | Per person      |
+| HB   |      +55 |       +75 | Per person      |
+| SUHB |     +175 |      +255 | HB + premium    |
+| WEL3 |     +150 |      +250 | WEL-lite        |
+| WEL  |     +250 |      +350 | Highest package |
+
+**Tier selection:**
+
+* Low tier: Occupancy <75% AND no high event
+* High tier: Occupancy ≥75% OR high event
+
+### C. Non-Dynamic / Negotiated Rates
+
+These DO NOT react to demand:
+
+* **CORL25** → 25% off BAR00 (static reference)
+* **OPQ** → 15% off BAR00 (static)
+* **STAFF** → 50% off BAR00 (static)
+
+---
+
+## 7. How to Add a New Rate Plan
+
+When adding a new rate plan, you must answer **all** of the following:
+
+1. **Category**
+
+   * Fully Dynamic
+   * Follower Package
+   * Non-Dynamic / Negotiated
+
+2. **Pricing Basis**
+
+   * Flat
+   * Per-person (A1 + C1)
+
+3. **Premium Logic**
+
+   * Fixed markup
+   * Tiered (low/high)
+   * Percentage of BAR00
+
+4. **Demand Sensitivity**
+
+   * Full (like BAR00)
+   * Tiered only
+   * None
+
+5. **Room-Type Applicability**
+
+   * All rooms
+   * Specific room types only
+
+> If any of these are undefined, the plan must NOT be added.
+
+---
+
+## 8. Banding Strategy (to be implemented next)
+
+* Date bands are allowed
+* A new band starts when:
+
+  * Final price changes by ≥ 1 EUR
+* Bands must never overlap
+
+---
+
+## 9. Non-Negotiables (Safety Rules)
+
+* Currency: **EUR**
+* Rounding: **whole EUR only**
+* No negative or zero prices
+* PRE is always fixed at 21,000
+* Unexpected room types or rate plans should fail validation
+
+---
+
+## 10. Change Management
+
+Any future change must:
+
+1. Be reflected in this README
+2. Specify whether it affects:
+
+   * Demand logic
+   * Room pricing
+   * Package behavior
+3. Be validated against row count impact
+
+---
+
+**This document exists to prevent logic drift and uncontrolled complexity.**
