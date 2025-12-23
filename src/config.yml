@@ -1,11 +1,19 @@
 otb:
-  file: BusinessOnTheBooks.csv
+  file: data/BusinessontheBooks.csv
   date_column: StayDate
   capacity_column: Capacity
   rooms_sold_column: RoomsSold
   group_rooms_column: GroupRooms
   cancelled_rooms_column: null
   no_show_rooms_column: null
+
+availability:
+  # Optional: use this if your OTB does NOT include Capacity.
+  # If Capacity exists in OTB, this file is ignored.
+  file: data/AvailabilitybyRoomType.csv
+  date_column: StayDate
+  room_type_column: RoomTypeCode
+  capacity_column: Capacity
 
 defaults:
   cancel_rate:
@@ -18,24 +26,12 @@ defaults:
 pricing_horizon_days: 90
 
 occupancy_thresholds:
-  - min: 0.00
-    max: 0.35
-    multiplier: 0.85
-  - min: 0.35
-    max: 0.55
-    multiplier: 1.00
-  - min: 0.55
-    max: 0.70
-    multiplier: 1.10
-  - min: 0.70
-    max: 0.82
-    multiplier: 1.20
-  - min: 0.82
-    max: 0.92
-    multiplier: 1.35
-  - min: 0.92
-    max: 1.00
-    multiplier: 1.50
+  - { min: 0.00, max: 0.35, multiplier: 0.85 }
+  - { min: 0.35, max: 0.55, multiplier: 1.00 }
+  - { min: 0.55, max: 0.70, multiplier: 1.10 }
+  - { min: 0.70, max: 0.82, multiplier: 1.20 }
+  - { min: 0.82, max: 0.92, multiplier: 1.35 }
+  - { min: 0.92, max: 1.00, multiplier: 1.50 }
 
 pickup:
   lookback_days: 3
@@ -47,6 +43,7 @@ pickup:
     very_strong: 0.10
 
 events:
+  file: data/events.yaml
   weights:
     Peak: 1.20
     High: 1.10
@@ -71,5 +68,8 @@ rate_plans:
   BARSUIT_multiplier: 1.25
 
 output:
-  pricing_file: RatePricing.csv
-  changes_file: RatePricing_changes.csv
+  pricing_file: data/RatePricing.csv
+  changes_file: data/RatePricing_changes.csv
+
+template:
+  file: data/RatePricing-Template.csv
