@@ -1,0 +1,31 @@
+Revenue Manager Summary — 2025-12-23
+
+I updated rates based on current on-the-books occupancy (net of expected cancellations/no-shows), plus event-related compression and group displacement where applicable.
+
+In total, 81,816 rate points changed: 0 increases and 0 decreases (across BAR00 and all derived plans).
+
+Over the next 14 days, the average pricing multiplier is 1.45. Rates were raised on higher-occupancy / higher-demand dates to protect ADR, and softened on lower-occupancy dates to stimulate pickup.
+
+Highest-pressure dates (next 14 days):
+ - 2026-01-02 (x1.54) — event impact: New Year’s Day
+ - 2025-12-31 (x1.54) — event impact: New Year’s Day
+ - 2026-01-05 (x1.54) — event impact: Epiphany / Three Kings’ Day
+ - 2025-12-25 (x1.50)
+ - 2025-12-23 (x1.50)
+
+Softest-demand dates (next 14 days):
+ - 2026-01-01 (x0.89)
+ - 2025-12-28 (x1.46)
+ - 2026-01-03 (x1.46)
+ - 2025-12-27 (x1.46)
+ - 2026-01-04 (x1.46)
+
+Event-related compression in the next 30 days:
+ - 2025-12-31: New Year’s Day (event multiplier x1.02)
+ - 2026-01-01: New Year’s Day (event multiplier x1.05)
+ - 2026-01-02: New Year’s Day (event multiplier x1.02)
+ - 2026-01-05: Epiphany / Three Kings’ Day (event multiplier x1.02)
+ - 2026-01-06: Epiphany / Three Kings’ Day (event multiplier x1.05)
+ - 2026-01-07: Epiphany / Three Kings’ Day (event multiplier x1.02)
+
+Operationally, updates were kept within guardrails (floors/ceiling) to avoid overreacting to short-term noise. If pickup accelerates or wash increases materially, the next run will adjust automatically.
