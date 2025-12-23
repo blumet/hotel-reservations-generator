@@ -520,7 +520,9 @@ def generate_pricing_rows(
 
         d = next_d
 
-    return pd.DataFrame(rows, columns=SCHEMA)
+    daily_df = pd.DataFrame(rows, columns=SCHEMA)
+    return compress_daily_rows_to_bands(daily_df)
+
 
 
 # --------------------------
