@@ -87,7 +87,7 @@ def main() -> int:
     start_date = as_of
     end_date = as_of + dt.timedelta(days=horizon_days)
 
-    # Optional: don’t generate beyond the max stay date present in OTB (keeps output tighter)
+    # Optional: don’t generate beyond the max stay date present in OTB (keeps output tight)
     if not daily.empty:
         max_otb_date = daily["stay_date"].max()
         if isinstance(max_otb_date, dt.date):
@@ -111,6 +111,7 @@ def main() -> int:
         end_date=end_date,
     )
 
+    # Overwrite output file with: template + new rows
     print("[INFO] Writing pricing output (overwrite)...")
     write_pricing_csv(
         baseline_csv_path=template_path,
@@ -127,6 +128,7 @@ def main() -> int:
         as_of=as_of,
     )
 
+    # ✅ Write GM-friendly narrative summary to the same folder as RatePricing.csv
     summary_path = os.path.join(os.path.dirname(out_pricing_path), "RatePricing_Summary.txt")
     print("[INFO] Writing GM summary...")
     write_summary_txt(
