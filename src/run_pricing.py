@@ -11,6 +11,9 @@ import yaml
 
 
 def repo_root() -> str:
+    """
+    Resolve repo root assuming this file is /src/run_pricing.py.
+    """
     here = os.path.abspath(os.path.dirname(__file__))
     return os.path.abspath(os.path.join(here, ".."))
 
@@ -21,7 +24,7 @@ def load_yaml(path: str) -> Dict[str, Any]:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser()
+    p = argparse.ArgumentParser(description="Revenue Autopilot - Occupancy-based pricing generator")
     p.add_argument("--config", default="src/config.yml", help="Path to config.yml (relative to repo root)")
     p.add_argument("--as_of", default=None, help="Override run date YYYY-MM-DD (default: today)")
     return p.parse_args()
@@ -72,6 +75,7 @@ def main() -> int:
         generate_pricing_rows,
         write_pricing_csv,
         write_changes_csv,
+        write_summary_txt,
     )
 
     print("[INFO] Loading events...")
@@ -118,8 +122,19 @@ def main() -> int:
         as_of=as_of,
     )
 
+    # ✅ Write GM-friendly narrative summary to the same folder as RatePricing.csv
+    summary_path = os.path.join(os.path.dirname(out_pricing_path), "RatePricing_Summary.txt")
+    print("[INFO] Writing GM summary...")
+    write_summary_txt(
+        multipliers_df=mult_df,
+        changes_csv_path=out_changes_path,
+        summary_txt_path=summary_path,
+        as_of=as_of,
+    )
+
     print(f"[OK] Wrote: {os.path.relpath(out_pricing_path, repo)}")
     print(f"[OK] Wrote: {os.path.relpath(out_changes_path, repo)}")
+    print(f"[OK] Wrote: {os.path.relpath(summary_path, repo)}")
     return 0
 
 
