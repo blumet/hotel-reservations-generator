@@ -21,7 +21,7 @@ defaults:
     weekday: 0.02
     weekend: 0.03
 
-pricing_horizon_days: 365
+pricing_horizon_days: 7
 
 occupancy_thresholds:
   - { min: 0.00, max: 0.35, multiplier: 0.85 }
