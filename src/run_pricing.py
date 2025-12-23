@@ -50,6 +50,13 @@ def main() -> int:
     start_date = as_of
     end_date = as_of + dt.timedelta(days=horizon_days)
 
+    # Optional: don't generate beyond max OTB date (keeps output tight)
+    if not daily.empty:
+        max_otb_date = daily["stay_date"].max()
+        if isinstance(max_otb_date, dt.date):
+            end_date = min(end_date, max_otb_date + dt.timedelta(days=1))  # +1 so that last date is included as a start
+
+
     # Resolve paths from config (matches your /data layout)
     otb_path = rpath(repo, cfg["otb"]["file"])
     events_path = rpath(repo, cfg["events"]["file"])
