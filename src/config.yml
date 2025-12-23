@@ -1,0 +1,75 @@
+otb:
+  file: BusinessOnTheBooks.csv
+  date_column: StayDate
+  capacity_column: Capacity
+  rooms_sold_column: RoomsSold
+  group_rooms_column: GroupRooms
+  cancelled_rooms_column: null
+  no_show_rooms_column: null
+
+defaults:
+  cancel_rate:
+    weekday: 0.08
+    weekend: 0.10
+  no_show_rate:
+    weekday: 0.02
+    weekend: 0.03
+
+pricing_horizon_days: 90
+
+occupancy_thresholds:
+  - min: 0.00
+    max: 0.35
+    multiplier: 0.85
+  - min: 0.35
+    max: 0.55
+    multiplier: 1.00
+  - min: 0.55
+    max: 0.70
+    multiplier: 1.10
+  - min: 0.70
+    max: 0.82
+    multiplier: 1.20
+  - min: 0.82
+    max: 0.92
+    multiplier: 1.35
+  - min: 0.92
+    max: 1.00
+    multiplier: 1.50
+
+pickup:
+  lookback_days: 3
+  strong_pickup_rooms_per_day: 5
+  very_strong_pickup_rooms_per_day: 8
+  adjustments:
+    weak: -0.05
+    strong: 0.05
+    very_strong: 0.10
+
+events:
+  weights:
+    Peak: 1.20
+    High: 1.10
+    Medium: 1.05
+  shoulder_factor: 0.5
+
+groups:
+  displacement_threshold: 0.20
+  uplift_low: 1.05
+  uplift_high: 1.10
+
+guardrails:
+  max_change_per_run: 0.08
+  floors:
+    summer: 0.95
+    compression_event: 1.10
+    low_season: 0.80
+  ceiling: 1.80
+
+rate_plans:
+  BARAPT_multiplier: 1.40
+  BARSUIT_multiplier: 1.25
+
+output:
+  pricing_file: RatePricing.csv
+  changes_file: RatePricing_changes.csv
