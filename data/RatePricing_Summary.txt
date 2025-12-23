@@ -2,7 +2,7 @@ Revenue Manager Summary — 2025-12-23
 
 I updated rates based on current on-the-books occupancy (net of expected cancellations/no-shows), plus event-related compression and group displacement where applicable.
 
-In total, 81,816 rate points changed: 0 increases and 0 decreases (across BAR00 and all derived plans).
+In total, 108,322 rate points changed: 0 increases and 0 decreases (across BAR00 and all derived plans).
 
 Over the next 14 days, the average pricing multiplier is 1.45. Rates were raised on higher-occupancy / higher-demand dates to protect ADR, and softened on lower-occupancy dates to stimulate pickup.
 
