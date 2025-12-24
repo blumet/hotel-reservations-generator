@@ -1,4 +1,4 @@
-Revenue Manager Summary — 2025-12-23
+Revenue Manager Summary — 2025-12-24
 
 I updated rates based on current on-the-books occupancy (net of expected cancellations/no-shows), plus event-related compression and group displacement where applicable.
 
@@ -7,17 +7,17 @@ In total, 3,905 rate points changed: 0 increases and 0 decreases.
 Over the next 14 days, the average pricing multiplier is 1.44. Rates were raised on higher-occupancy / higher-demand dates to protect ADR, and softened on lower-occupancy dates to stimulate pickup.
 
 Highest-pressure dates (next 14 days):
- - 2025-12-23 (x1.50)
  - 2025-12-24 (x1.50)
  - 2025-12-25 (x1.50)
  - 2025-12-26 (x1.50)
- - 2025-12-30 (x1.50)
+ - 2025-12-29 (x1.50)
+ - 2025-12-31 (x1.50)
 
 Softest-demand dates (next 14 days):
  - 2026-01-01 (x0.85)
- - 2025-12-28 (x1.46)
- - 2026-01-03 (x1.46)
  - 2025-12-27 (x1.46)
+ - 2026-01-03 (x1.46)
+ - 2025-12-28 (x1.46)
  - 2026-01-04 (x1.46)
 
 Operationally, updates were kept within guardrails (floors/ceiling). If pickup accelerates or wash increases materially, the next run will adjust automatically.
