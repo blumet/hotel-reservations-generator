@@ -1,0 +1,70 @@
+Guest Name,Room Type,VIP,Company/Travel Agent,Group Code,Arr.Date,#Nights,Rate Plan,Room Rate Total,Created On,CXL Date/Time,CXL No.,CXL Fee Due,CXL Reason
+"Alves, Aline, Ms ",KCST,OWNER, ,,24/12/2025,10,BAREX,"12,510.00",24/11/2025,24/12/2025 18:09,1874,"1,230.00",TPC
+,,,,,,,,,,,,"1,230.00",
+,,,CORN,,03/01/2026,1/0,"1,230.00",,IBE,Tiziana Messina,NON2,,
+"Anderson, Abbie, Mrs ",KGDX,,Banco Bilbao Vizcaya ,,24/12/2025,8,OTA1,"5,700.00",25/11/2025,24/12/2025 18:09,1879,670.00,TPC
+,,,,,,,,,,,,670.00,
+,,,CORN,,01/01/2026,1/0,670.00,,GDS,Tiziana Messina,NON2,,
+"Aslakhanov, Adlan, Mr ",TCDX,REG,Madrid Viajes ,,24/12/2025,7,BAREX,"5,733.00",31/10/2025,24/12/2025 18:09,1875,810.00,TPC
+,,,,,,,,,,,,810.00,
+,,,CORG,,31/12/2025,1/0,810.00,,HOT,Tiziana Messina,NON2,,
+"Berger, Denise, Mrs ",KGSP,,Bayerische Motoren Werke (BMW) ,,24/12/2025,7,BARAD,"4,501.43",25/11/2025,24/12/2025 17:45,1870,591.75,RCO
+,,,,,,,,,,,,591.75,
+,,,CORG,,31/12/2025,2/0,591.75,,CRS,Tiziana Messina,NON2,,
+"Carvalho, Tomás, Mr ",KGDX,,Banco Bilbao Vizcaya ,,24/12/2025,10,OTA1,"7,210.00",24/11/2025,24/12/2025 18:09,1877,670.00,TPC
+,,,,,,,,,,,,670.00,
+,,,CORN,,03/01/2026,2/0,670.00,,GDS,Tiziana Messina,NON2,,
+"Cavalcanti, Lara, Mrs ",KCDX,VIP-GAMING-T1, ,,24/12/2025,5,BAREX,"4,050.00",24/11/2025,24/12/2025 17:45,1871,810.00,RCO
+,,,,,,,,,,,,810.00,
+,,,CORL,,29/12/2025,2/0,810.00,,CRS,Tiziana Messina,NON2,,
+"Costa, Kauan, Mr ",KCST,, ,,24/12/2025,9,BAREX,"11,280.00",22/11/2025,24/12/2025 18:09,1873,"1,230.00",TPC
+,,,,,,,,,,,,"1,230.00",
+,,,PRMF,,02/01/2026,1/0,"1,230.00",,CRO,Tiziana Messina,NON2,,
+"Geirmundsson, Samúel, Mr ",TCDX,COR, ,,24/12/2025,4,BAREX,"3,320.00",22/11/2025,24/12/2025 18:09,1876,830.00,TPC
+,,,,,,,,,,,,830.00,
+,,,CORG,,28/12/2025,2/0,830.00,,HOT,Tiziana Messina,NON2,,
+"Herbertsson, Kristmann, Mr ",TCDX,, ,,24/12/2025,3,BAR10,"2,040.00",31/10/2025,24/12/2025 18:09,1878,680.00,TPC
+,,,,,,,,,,,,680.00,
+,,,CORG,,27/12/2025,1/0,680.00,,SIT,Tiziana Messina,FLEX,,
+"Jabłońska, Klara, Mrs ",TCDX,, ,,24/12/2025,1,BAREX,830.00,20/12/2025,24/12/2025 18:09,1880,830.00,TPC
+,,,,,,,,,,,,830.00,
+,,,PRMF,,25/12/2025,2/0,830.00,,CRO,Tiziana Messina,NON2,,
+"Rutkowski, Anastazy, Mr ",TCDX,, ,,24/12/2025,1,BAREX,830.00,20/12/2025,24/12/2025 17:45,1868,830.00,RCO
+,,,,,,,,,,,,830.00,
+,,,FIT1,,25/12/2025,2/0,830.00,,CRS,Tiziana Messina,NON2,,
+"Sousa, Bruno, Mr ",KGST,, ,,24/12/2025,9,BAR00,"9,698.80",25/11/2025,24/12/2025 17:45,1869,989.00,RCO
+,,,,,,,,,,,,989.00,
+,,,CORG,,02/01/2026,1/0,989.00,,OTH,Tiziana Messina,FLEX,,
+"Vasiliev, Moses, Mr ",TWDX,, ,,24/12/2025,6,DAY,"2,394.00",25/11/2025,24/12/2025 17:45,1872,399.00,RCO
+,,,,,,,,,,,,399.00,
+,,,CORG,,30/12/2025,2/0,399.00,,SIT,Tiziana Messina,NON2,,
+"Bazhaev, Tumisha, Ms ",TWDX,,Rolex AG ,,25/12/2025,8,BAR10,"5,503.56",22/11/2025,25/12/2025 20:11,1884,631.20,BAH
+,,,,,,,,,,,,631.20,
+,,,FIT1,,02/01/2026,1/0,646.91,,SYN,Tiziana Messina,FLEX,,
+"Grandini, Giacomo, Mr ",KGDX,, ,,25/12/2025,3,PARK,"2,242.50",29/07/2025,25/12/2025 20:12,1886,0.00,BAH
+,,,,,,,,,,,,"1,000.00",
+,0203,,FIT1,,28/12/2025,2/0,747.50,"2,377.50",CRO,Tiziana Messina,,,
+"Ottarsdóttir, Ellen, Mrs ",KGSP,, ,,25/12/2025,7,BAR10,"4,852.10",25/11/2025,25/12/2025 20:11,1883,631.20,TPC
+,,,,,,,,,,,,631.20,
+,,,FIT1,,01/01/2026,2/0,646.26,,OTH,Tiziana Messina,FLEX,,
+"Ricci, Ubaldo, Mr ",KGDX,, ,,25/12/2025,7,BARAD,"4,560.61",24/11/2025,25/12/2025 20:11,1881,591.75,TPC
+,,,,,,,,,,,,591.75,
+,,,CORN,,01/01/2026,2/0,591.75,,CRS,Tiziana Messina,NON2,,
+"Ulyanov, Milan, Mr ",KGDX,,Amazon Switzerland ,,25/12/2025,7,OPQ,"3,430.00",25/11/2025,25/12/2025 20:11,1882,490.00,TPC
+,,,,,,,,,,,,490.00,
+,,,FIT1,,01/01/2026,1/0,490.00,,SIT,Tiziana Messina,NON2,,
+"Þorsteinsdóttir, Hugrún, Ms ",TCDX,, ,,25/12/2025,10,BAREX,"8,582.86",25/11/2025,25/12/2025 20:12,1885,830.00,BAH
+,,,,,,,,,,,,830.00,
+,,,CORG,,04/01/2026,1/0,841.22,,OTH,Tiziana Messina,NON2,,
+"Bodrova, Greta, Mrs ",TCDX,OWNER, ,,26/12/2025,1,BAREX,830.00,20/12/2025,25/12/2025 20:13,1889,830.00,6PM
+,,,,,,,,,,,,830.00,
+,,,PRMF,,27/12/2025,2/0,830.00,,CRS,Tiziana Messina,NON2,,
+"Bogolyubova, Irina, Mrs ",KGDX,,Austrian Airlines ,,26/12/2025,2,BARAD,"1,483.50",25/11/2025,25/12/2025 20:13,1888,741.75,6PM
+,,,,,,,,,,,,741.75,
+,,,CORG,,28/12/2025,2/0,741.75,,IBE,Tiziana Messina,NON2,,
+"Duda, Gustaw, Mr ",KGDX,,Austrian Airlines ,,26/12/2025,6,BAR10,"4,107.20",24/11/2025,25/12/2025 20:13,1890,0.00,6PM
+,,,,,,,,,,,,,
+,,,CORG,,01/01/2026,2/0,791.20,,CRS,Tiziana Messina,FLEX,,
+"Ricci, Ubaldo, Mr ",KCDX,, ,,26/12/2025,6,BAREX,"4,986.00",25/11/2025,25/12/2025 20:13,1887,810.00,6PM
+,,,,,,,,,,,,810.00,
+,,,FIT1,,01/01/2026,1/0,810.00,,GDS,Tiziana Messina,NON2,,
