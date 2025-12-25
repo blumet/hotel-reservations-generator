@@ -464,8 +464,37 @@ def write_pricing_csv(
 ) -> None:
     base = pd.read_csv(baseline_csv_path, dtype=str).fillna("")
     base = base[SCHEMA].copy()
-    out = pd.concat([base, appended_rows_df], ignore_index=True)
+
+    if appended_rows_df.empty:
+        base.to_csv(output_csv_path, index=False, quoting=csv.QUOTE_MINIMAL)
+        return
+
+    # Parse dates
+    base["StartDate"] = pd.to_datetime(base["StartDate"], errors="coerce")
+    base["EndDate"] = pd.to_datetime(base["EndDate"], errors="coerce")
+
+    new = appended_rows_df.copy()
+    new["StartDate"] = pd.to_datetime(new["StartDate"])
+    new["EndDate"] = pd.to_datetime(new["EndDate"])
+
+    horizon_start = new["StartDate"].min()
+    horizon_end = new["EndDate"].max()
+
+    # Rate plans we actively generate
+    generated_plans = set(new["RatePlanCode"].unique())
+
+    # 🔥 HARD REMOVE baseline rows for generated plans inside horizon
+    keep_mask = ~(
+        (base["RatePlanCode"].isin(generated_plans)) &
+        (base["StartDate"] < horizon_end) &
+        (base["EndDate"] > horizon_start)
+    )
+
+    base_kept = base.loc[keep_mask].copy()
+
+    out = pd.concat([base_kept, appended_rows_df], ignore_index=True)
     out.to_csv(output_csv_path, index=False, quoting=csv.QUOTE_MINIMAL)
+
 
 
 def write_changes_csv(
