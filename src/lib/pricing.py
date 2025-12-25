@@ -25,7 +25,8 @@ Per-person plans still generated (A1/C1):
 
 CRITICAL PMS IMPORT FIX:
 - When writing RatePricing.csv, remove any TEMPLATE rows that overlap the generated horizon
-  for the SAME (Currency, RoomTypeCode, RatePlanCode, AgeBucketCode) keys.
+  for the SAME key:
+    (Currency, RoomTypeCode, RatePlanCode, AgeBucketCode)
   This prevents overlapping pricing periods in the PMS.
 """
 
@@ -120,10 +121,6 @@ def _latest_by_key(df: pd.DataFrame, rateplan: str) -> pd.DataFrame:
 
 
 def _compute_ratio_dict(plan_latest: pd.DataFrame, bar_latest: pd.DataFrame) -> Dict[Tuple[str, str], Dict[str, float]]:
-    """
-    Compute per-key ratios (plan / BAR00) for OneGuest/TwoGuests/ExtraGuest and optionally Flat.
-    Only uses columns present (non-blank) in both plan and BAR00.
-    """
     ratios: Dict[Tuple[str, str], Dict[str, float]] = {}
     merged = plan_latest.merge(
         bar_latest,
@@ -153,10 +150,6 @@ def compute_multipliers(
     cfg: Dict[str, Any],
     as_of: dt.date,
 ) -> pd.DataFrame:
-    """
-    Returns DataFrame with:
-      stay_date, final_multiplier, reason, event_name, event_multiplier
-    """
     df = daily_metrics_df.copy()
 
     ev = event_mult_df.copy()
@@ -177,7 +170,6 @@ def compute_multipliers(
     # v1 pickup placeholder
     df["pickup_multiplier"] = 1.0
 
-    # wash multiplier (small safety if wash rate is high)
     def wash_mult(row) -> float:
         net_otb = float(row.get("net_otb", 0.0))
         expected_wash = float(row.get("expected_wash", 0.0))
@@ -188,7 +180,6 @@ def compute_multipliers(
 
     df["wash_multiplier"] = df.apply(wash_mult, axis=1)
 
-    # group displacement
     gcfg = cfg["groups"]
     thresh = float(gcfg["displacement_threshold"])
     uplift_low = float(gcfg["uplift_low"])
@@ -268,15 +259,10 @@ def generate_pricing_rows(
     start_date: dt.date,
     end_date: dt.date,
 ) -> pd.DataFrame:
-    """
-    Generate pricing rows for each day in [start_date, end_date) as 1-night bands.
-    Applies your "flat-only" plan rules.
-    """
     bar_latest = _latest_by_key(template_df, "BAR00")
     if bar_latest.empty:
         raise ValueError("Template has no BAR00 rows; cannot build any pricing.")
 
-    # Ratio plans come from template structure
     hb_latest = _latest_by_key(template_df, "HB")
     wel_latest = _latest_by_key(template_df, "WEL")
     grp_latest = _latest_by_key(template_df, "GRPBASE")
@@ -285,7 +271,6 @@ def generate_pricing_rows(
     wel_ratios = _compute_ratio_dict(wel_latest, bar_latest) if not wel_latest.empty else {}
     grp_ratios = _compute_ratio_dict(grp_latest, bar_latest) if not grp_latest.empty else {}
 
-    # Baseline BAR00 values by (RoomTypeCode, AgeBucketCode)
     baseline: Dict[Tuple[str, str], Dict[str, Optional[float]]] = {}
     for _, r in bar_latest.iterrows():
         key = (r["RoomTypeCode"], r["AgeBucketCode"])
@@ -319,17 +304,13 @@ def generate_pricing_rows(
         mult = mult_map.get(d, 1.0)
         next_d = d + dt.timedelta(days=1)
 
-        # Internal per-person BAR00 per (rt, ab) for other per-person plans
         bar_pp_per_key: Dict[Tuple[str, str], Tuple[str, str, str]] = {}
-
-        # Output BAR00 flat per room type (flat basis = TwoGuests(A1))
         bar_flat_by_room: Dict[str, str] = {}
 
-        # ---------- 1) Build internal BAR00 per-person + output BAR00 flat ----------
+        # Build internal per-person BAR00 and output BAR00 flat
         for (rt, ab), base_vals in baseline.items():
             currency = "EUR"
 
-            # PRE remains template flat-only (AgeBucket blank)
             if rt == "PRE" and ab == "":
                 base_flat = base_vals.get("Flat")
                 if base_flat is None:
@@ -339,7 +320,6 @@ def generate_pricing_rows(
                 add_row(currency, rt, "BAR00", d, next_d, "", flat, "", "", "")
                 continue
 
-            # internal per-person BAR00 (used by per-person plans)
             if ab != "":
                 base_og = base_vals.get("OneGuest")
                 base_tg = base_vals.get("TwoGuests")
@@ -350,17 +330,14 @@ def generate_pricing_rows(
                     eg = _to_str_or_blank(_rnd(base_eg * mult))
                     bar_pp_per_key[(rt, ab)] = (og, tg, eg)
 
-                    # Flat basis rule: TwoGuests(A1) -> Flat BAR00 (for non-PRE)
                     if ab == "A1":
                         bar_flat_by_room[rt] = tg
 
-        # Output BAR00 flat rows for all room types (non-PRE)
         for rt, flat in bar_flat_by_room.items():
             if rt == "PRE":
                 continue
             add_row("EUR", rt, "BAR00", d, next_d, "", flat, "", "", "")
 
-        # ---------- 2) Flat-only derived plans from BAR00 flat ----------
         def add_flat_plan(plan: str, factor: float, room_filter=None):
             for rt, bar_flat in bar_flat_by_room.items():
                 if room_filter and rt not in room_filter:
@@ -373,28 +350,30 @@ def generate_pricing_rows(
         add_flat_plan("CORL25", 0.75)
         add_flat_plan("WAL", 0.85)
 
-        # BARAPT flat-only (A1KB/A2KB only)
         barapt_factor = float(cfg["rate_plans"]["BARAPT_multiplier"])
         add_flat_plan("BARAPT", barapt_factor, room_filter={"A1KB", "A2KB"})
 
-        # BARSUIT flat-only (KCST/KGST/PRE only)
         barsuit_factor = float(cfg["rate_plans"]["BARSUIT_multiplier"])
         add_flat_plan("BARSUIT", barsuit_factor, room_filter={"KCST", "KGST", "PRE"})
 
-        # ---------- 3) Per-person plans (unchanged) based on internal BAR00 per-person ----------
         def derive_pp_simple(plan: str, factor: float):
             for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
-                add_row(
-                    "EUR", rt, plan, d, next_d, ab, "",
-                    _to_str_or_blank(_rnd(float(og) * factor)),
-                    _to_str_or_blank(_rnd(float(tg) * factor)),
-                    _to_str_or_blank(_rnd(float(eg) * factor)),
-                )
+                rows.append({
+                    "Currency": "EUR",
+                    "RoomTypeCode": rt,
+                    "RatePlanCode": plan,
+                    "StartDate": d.isoformat(),
+                    "EndDate": next_d.isoformat(),
+                    "AgeBucketCode": ab,
+                    "Flat": "",
+                    "OneGuest": _to_str_or_blank(_rnd(float(og) * factor)),
+                    "TwoGuests": _to_str_or_blank(_rnd(float(tg) * factor)),
+                    "ExtraGuest": _to_str_or_blank(_rnd(float(eg) * factor)),
+                })
 
         derive_pp_simple("OPQ", 0.80)
         derive_pp_simple("STAFF", 0.50)
 
-        # BB per-person (+35)
         for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
             add_row(
                 "EUR", rt, "BB", d, next_d, ab, "",
@@ -403,8 +382,7 @@ def generate_pricing_rows(
                 _to_str_or_blank(_rnd(float(eg) + 35)),
             )
 
-        # WEL3 weekends-only per-person (Fri/Sat nights)
-        if d.weekday() in (4, 5):
+        if d.weekday() in (4, 5):  # Fri/Sat
             for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
                 add_row(
                     "EUR", rt, "WEL3", d, next_d, ab, "",
@@ -413,7 +391,6 @@ def generate_pricing_rows(
                     _to_str_or_blank(_rnd(float(eg) * 1.35)),
                 )
 
-        # Ratio-based per-person plans (HB/WEL/GRPBASE) remain per-person
         def apply_ratio_plan(plan: str, ratios: Dict[Tuple[str, str], Dict[str, float]]):
             for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
                 ratio = ratios.get((rt, ab))
@@ -430,7 +407,6 @@ def generate_pricing_rows(
         apply_ratio_plan("WEL", wel_ratios)
         apply_ratio_plan("GRPBASE", grp_ratios)
 
-        # SUHB per-person = HB * 1.25
         for (rt, ab), (og, tg, eg) in bar_pp_per_key.items():
             ratio = hb_ratios.get((rt, ab))
             if not ratio:
@@ -445,8 +421,6 @@ def generate_pricing_rows(
                 _to_str_or_blank(_rnd(h_eg * 1.25 if h_eg is not None else None)),
             )
 
-        # ---------- 4) GRPHIG flat-only (derive from BAR00 flat) ----------
-        # Use template GRPBASE TwoGuests ratio if present for (rt,"A1"), else fallback 0.70
         for rt, bar_flat in bar_flat_by_room.items():
             r = grp_ratios.get((rt, "A1"), {})
             grpbase_factor = float(r.get("TwoGuests", 0.70))
@@ -467,13 +441,6 @@ def write_pricing_csv(
     appended_rows_df: pd.DataFrame,
     output_csv_path: str,
 ) -> None:
-    """
-    Write output CSV as: (Template rows kept) + (Generated rows),
-    BUT remove any template rows that overlap the generated horizon for the SAME key:
-      (Currency, RoomTypeCode, RatePlanCode, AgeBucketCode)
-
-    This prevents "Overlapping pricing periods" errors in the PMS.
-    """
     base = pd.read_csv(baseline_csv_path, dtype=str).fillna("")
     base = base[SCHEMA].copy()
 
@@ -481,7 +448,6 @@ def write_pricing_csv(
         base.to_csv(output_csv_path, index=False, quoting=csv.QUOTE_MINIMAL)
         return
 
-    # Parse dates
     base_dt = base.copy()
     base_dt["StartDate"] = pd.to_datetime(base_dt["StartDate"], errors="coerce")
     base_dt["EndDate"] = pd.to_datetime(base_dt["EndDate"], errors="coerce")
@@ -502,7 +468,6 @@ def write_pricing_csv(
             return False
         if pd.isna(row["StartDate"]) or pd.isna(row["EndDate"]):
             return False
-        # overlap if: base.Start < horizon_end AND base.End > horizon_start
         return (row["StartDate"] < horizon_end) and (row["EndDate"] > horizon_start)
 
     drop_mask = base_dt.apply(should_drop, axis=1)
@@ -526,7 +491,7 @@ def write_changes_csv(
     base_k = base.set_index(key_cols)
     new_k = appended_rows_df.set_index(key_cols)
 
-    rows = []
+    rows_out = []
     for key, new_row in new_k.iterrows():
         old_row = base_k.loc[key] if key in base_k.index else None
 
@@ -542,7 +507,7 @@ def write_changes_csv(
             if delta is not None and old_v not in (None, 0):
                 delta_pct = delta / old_v
 
-            rows.append({
+            rows_out.append({
                 "RunDate": as_of.isoformat(),
                 "RoomTypeCode": key[0],
                 "RatePlanCode": key[1],
@@ -556,7 +521,7 @@ def write_changes_csv(
                 "DeltaPct": "" if delta_pct is None else round(delta_pct, 4),
             })
 
-    pd.DataFrame(rows).to_csv(changes_csv_path, index=False)
+    pd.DataFrame(rows_out).to_csv(changes_csv_path, index=False)
 
 
 def write_summary_txt(
