@@ -1,26 +1,7 @@
 Revenue Manager Summary — 2025-12-25
 
-I updated rates based on current on-the-books occupancy (net of expected cancellations/no-shows), plus event-related compression and group displacement where applicable.
+Rates were adjusted using forecast occupancy and event weighting. Cancellations/no-shows are not directly observed in this build unless provided as separate reports.
 
-In total, 3,905 rate points changed: 0 increases and 0 decreases.
+In total, 3,905 rate points generated/compared: 0 increases and 0 decreases.
 
-Over the next 14 days, the average pricing multiplier is 1.49. Rates were raised on high-occupancy/high-demand dates and softened on low-demand dates.
-
-Highest-pressure dates (next 14 days):
- - 2025-12-31 (x1.54) — event: New Year’s Day
- - 2025-12-25 (x1.50)
- - 2025-12-30 (x1.50)
- - 2025-12-29 (x1.50)
- - 2026-01-01 (x1.50)
-
-Softest-demand dates (next 14 days):
- - 2025-12-28 (x1.46)
- - 2025-12-27 (x1.46)
- - 2026-01-04 (x1.46)
- - 2026-01-03 (x1.46)
- - 2025-12-29 (x1.50)
-
-Event-related compression in the next 30 days:
- - 2025-12-31: New Year’s Day (event multiplier x1.02)
-
-Updates were kept within configured guardrails (floors/ceiling).
+Over the next 14 days, the average pricing multiplier is 1.50.
