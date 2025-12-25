@@ -4,21 +4,21 @@ I updated rates based on current on-the-books occupancy (net of expected cancell
 
 In total, 3,905 rate points changed: 0 increases and 0 decreases.
 
-Over the next 14 days, the average pricing multiplier is 1.44. Rates were raised on higher-occupancy / higher-demand dates to protect ADR, and softened on lower-occupancy dates to stimulate pickup.
+Over the next 14 days, the average pricing multiplier is 1.49. Rates were raised on higher-occupancy / higher-demand dates to protect ADR, and softened on lower-occupancy dates to stimulate pickup.
 
 Highest-pressure dates (next 14 days):
  - 2025-12-31 (x1.54) — event impact: New Year’s Day
  - 2025-12-25 (x1.50)
  - 2025-12-30 (x1.50)
  - 2025-12-29 (x1.50)
- - 2026-01-02 (x1.50)
+ - 2026-01-01 (x1.50)
 
 Softest-demand dates (next 14 days):
- - 2026-01-01 (x0.85)
  - 2025-12-28 (x1.46)
  - 2025-12-27 (x1.46)
- - 2026-01-03 (x1.46)
  - 2026-01-04 (x1.46)
+ - 2026-01-03 (x1.46)
+ - 2025-12-29 (x1.50)
 
 Event-related compression in the next 30 days:
  - 2025-12-31: New Year’s Day (event multiplier x1.02)
