@@ -1,7 +1,7 @@
-Revenue Manager Summary — 2025-12-25
+Revenue Manager Summary — 2025-12-26
 
 Rates were adjusted using forecast occupancy and event weighting. Cancellations/no-shows are not directly observed in this build unless provided as separate reports.
 
 In total, 3,905 rate points generated/compared: 0 increases and 0 decreases.
 
-Over the next 14 days, the average pricing multiplier is 1.50.
+Over the next 14 days, the average pricing multiplier is 1.51.
