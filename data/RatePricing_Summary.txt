@@ -1,4 +1,4 @@
-Revenue Manager Summary — 2025-12-26
+Revenue Manager Summary — 2025-12-27
 
 Rates were adjusted using forecast occupancy and event weighting. Cancellations/no-shows are not directly observed in this build unless provided as separate reports.
 
